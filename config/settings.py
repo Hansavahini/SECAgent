@@ -10,17 +10,88 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 
+import os
 from pathlib import Path
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 
+# ---------------------------------------------------------------------
+# .env loading
+#
+# This project has NO python-dotenv dependency (see requirements.txt),
+# so we load backend/.env with the standard library only.
+#
+# Rules:
+#   - real environment variables always win over .env
+#   - blank lines and "#" comments are ignored
+#   - "export KEY=value" is accepted
+#   - surrounding single/double quotes are stripped
+# ---------------------------------------------------------------------
+
+def _load_env_file(env_path: Path) -> None:
+    if not env_path.is_file():
+        return
+
+    try:
+        raw_text = env_path.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeDecodeError):
+        return
+
+    for raw_line in raw_text.splitlines():
+        line = raw_line.strip()
+
+        if not line or line.startswith("#"):
+            continue
+
+        if line.lower().startswith("export "):
+            line = line[len("export "):].strip()
+
+        if "=" not in line:
+            continue
+
+        key, _, value = line.partition("=")
+
+        key = key.strip()
+        value = value.strip()
+
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+_load_env_file(BASE_DIR / ".env")
+
+
+def _env_str(name, default=""):
+    return os.environ.get(name, default).strip()
+
+
+def _env_int(name, default):
+    try:
+        return int(_env_str(name, str(default)))
+    except ValueError:
+        return default
+
+
+def _env_float(name, default):
+    try:
+        return float(_env_str(name, str(default)))
+    except ValueError:
+        return default
+
+
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-*3$mgky-th#0y#q%q9l!5^=lv!kk03k58r_+dc5x#j*#oi^+h4'
+SECRET_KEY = _env_str(
+    'DJANGO_SECRET_KEY',
+    'django-insecure-*3$mgky-th#0y#q%q9l!5^=lv!kk03k58r_+dc5x#j*#oi^+h4',
+)
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
@@ -122,3 +193,40 @@ STATIC_URL = 'static/'
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+
+# ---------------------------------------------------------------------
+# SEC EDGAR settings
+#
+# SEC_USER_AGENT is REQUIRED by SEC fair-access policy.
+# Set it in backend/.env, e.g.:
+#
+#   SEC_USER_AGENT=Vikram Sethi vikram.sethi@onesmarter.com
+#
+# It is intentionally NOT validated here: raising in settings.py would
+# break every management command, including ones that never touch SEC.
+# SECClient raises a clear ImproperlyConfigured instead.
+# ---------------------------------------------------------------------
+
+SEC_USER_AGENT = _env_str('SEC_USER_AGENT')
+
+# (connect timeout, read timeout) in seconds - never None, never infinite.
+SEC_REQUEST_TIMEOUT = (
+    _env_float('SEC_CONNECT_TIMEOUT', 10.0),
+    _env_float('SEC_READ_TIMEOUT', 30.0),
+)
+
+# Total attempts per request (1 = no retry).
+SEC_MAX_RETRIES = _env_int('SEC_MAX_RETRIES', 4)
+
+# Minimum seconds between SEC requests. SEC allows ~10 req/sec.
+SEC_MIN_REQUEST_INTERVAL = _env_float('SEC_MIN_REQUEST_INTERVAL', 0.15)
+
+# Cap on how many EDGAR full-text-search hits we page through.
+SEC_SEARCH_MAX_RESULTS = _env_int('SEC_SEARCH_MAX_RESULTS', 200)
+
+# Downloads are anchored to BASE_DIR so they do not depend on the
+# current working directory.
+SEC_DOWNLOAD_DIR = Path(
+    _env_str('SEC_DOWNLOAD_DIR') or str(BASE_DIR / 'downloads')
+)

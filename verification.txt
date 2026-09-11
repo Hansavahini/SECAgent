@@ -1,0 +1,24 @@
+# 1. Config is sane, no network needed
+python manage.py check
+
+# 2. Resolver alone - the call that used to hang
+python manage.py test_resolver
+
+# 3. Search alone, no downloads
+python manage.py test_search
+
+# 4. Clean slate, then the real run
+del downloads\downloaded_files.json
+python manage.py test_download NKE
+
+# 5. Run again - every row should say "Already downloaded"
+python manage.py test_download NKE
+
+# 6. What actually landed, newest first
+dir downloads\filings | Sort-Object LastWriteTime -Descending
+
+# 7. The registry keys
+type downloads\downloaded_files.json
+
+# 8. Confirm a downloaded file is real HTML, not an error page
+Get-Content (Get-ChildItem downloads\filings\*.htm | Select-Object -First 1).FullName -TotalCount 20
