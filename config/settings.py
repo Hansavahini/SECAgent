@@ -230,3 +230,16 @@ SEC_SEARCH_MAX_RESULTS = _env_int('SEC_SEARCH_MAX_RESULTS', 200)
 SEC_DOWNLOAD_DIR = Path(
     _env_str('SEC_DOWNLOAD_DIR') or str(BASE_DIR / 'downloads')
 )
+
+# ---------------------------------------------------------------------
+# Ticker input file
+#
+# Production watcher reads ticker symbols from one configured file.
+# Keep the path outside application code so deployments can change
+# the input location without modifying Python files.
+# ---------------------------------------------------------------------
+
+SEC_TICKER_FILE = Path(
+    _env_str("SEC_TICKER_FILE")
+    or str(BASE_DIR / "tickers.txt")
+)
