@@ -2,6 +2,9 @@ from watcher.services.download_registry import DownloadRegistry
 from watcher.services.filing_discovery import FilingDiscovery
 from watcher.services.filing_downloader import FilingDownloader
 from watcher.services.ticker_resolver import TickerResolver
+from watcher.knowledge_base.ingestion.filing_registration import (
+    FilingRegistrationService,
+)
 
 
 class TickerProcessor:
@@ -29,11 +32,17 @@ class TickerProcessor:
         discovery=None,
         downloader=None,
         registry=None,
+        registration_service=None,
     ):
         self.resolver = resolver or TickerResolver()
         self.discovery = discovery or FilingDiscovery()
         self.downloader = downloader or FilingDownloader()
         self.registry = registry or DownloadRegistry()
+
+        self.registration_service = (
+            registration_service
+            or FilingRegistrationService()
+        )
 
     def process(self, ticker):
         """
@@ -116,8 +125,8 @@ class TickerProcessor:
                 ]
 
                 try:
-                    # Resolve the real SEC document first so that we know
-                    # its exact sequence before checking the registry.
+                    # Resolve the exact SEC document first so its
+                    # sequence is known before duplicate checking.
                     base_url, document = (
                         self.downloader.resolve_document(
                             cik=cik,
@@ -136,7 +145,7 @@ class TickerProcessor:
                             "SEC document sequence could not be resolved"
                         )
 
-                    # Existing duplicate protection remains unchanged.
+                    # Preserve existing duplicate protection.
                     if self.registry.is_downloaded(
                         cik,
                         accession_number,
@@ -182,7 +191,8 @@ class TickerProcessor:
                         or sequence
                     ).strip()
 
-                    # Mark only after the final file write succeeds.
+                    # Mark downloaded only after the final file
+                    # has been successfully written.
                     self.registry.mark_downloaded(
                         cik,
                         accession_number,
@@ -192,6 +202,32 @@ class TickerProcessor:
                     form_summary["downloaded"] += 1
                     summary["downloaded"] += 1
 
+                    # KB registration is deliberately isolated.
+                    # A database/KB problem must not undo a
+                    # successful SEC download.
+                    try:
+                        self.registration_service.register(
+                            ticker=resolved_ticker,
+                            cik=cik,
+                            company_name=company.get(
+                                "name",
+                                "",
+                            ),
+                            form=form,
+                            accession_number=accession_number,
+                            sequence=downloaded_sequence,
+                            filing_date=filing_date,
+                            primary_document=primary_document,
+                            local_path=result["path"],
+                            source_url=result["url"],
+                        )
+
+                    except Exception as exc:
+                        form_summary["errors"].append(
+                            "Knowledge-base registration failed "
+                            f"for {accession_number}: {exc}"
+                        )
+
                 except Exception as exc:
                     form_summary["failed"] += 1
                     summary["failed"] += 1
@@ -200,7 +236,7 @@ class TickerProcessor:
                         f"{accession_number}: {exc}"
                     )
 
-                    # One bad filing must not stop the remaining filings.
+                    # One bad filing must not stop remaining filings.
                     continue
 
         return summary
