@@ -16,9 +16,15 @@ class HybridRetrievalResult:
     form: str
     filing_date: date | None
     accession_number: str
+
+    document_type: str
+    document_name: str
+    is_primary: bool
+
     item_number: str
     section_title: str
     text: str
+
     hybrid_score: float
     vector_score: float
     keyword_score: float
@@ -100,11 +106,24 @@ class HybridRetriever:
                     "chunk_id": result.chunk_id,
                     "ticker": result.ticker,
                     "form": result.form,
-                    "filing_date": result.filing_date,
+                    "filing_date": (
+                        result.filing_date
+                    ),
                     "accession_number": (
                         result.accession_number
                     ),
-                    "item_number": result.item_number,
+                    "document_type": (
+                        result.document_type
+                    ),
+                    "document_name": (
+                        result.document_name
+                    ),
+                    "is_primary": (
+                        result.is_primary
+                    ),
+                    "item_number": (
+                        result.item_number
+                    ),
                     "section_title": (
                         result.section_title
                     ),
@@ -128,11 +147,24 @@ class HybridRetriever:
                     "chunk_id": result.chunk_id,
                     "ticker": result.ticker,
                     "form": result.form,
-                    "filing_date": result.filing_date,
+                    "filing_date": (
+                        result.filing_date
+                    ),
                     "accession_number": (
                         result.accession_number
                     ),
-                    "item_number": result.item_number,
+                    "document_type": (
+                        result.document_type
+                    ),
+                    "document_name": (
+                        result.document_name
+                    ),
+                    "is_primary": (
+                        result.is_primary
+                    ),
+                    "item_number": (
+                        result.item_number
+                    ),
                     "section_title": (
                         result.section_title
                     ),
@@ -166,6 +198,15 @@ class HybridRetriever:
                     ),
                     accession_number=(
                         record["accession_number"]
+                    ),
+                    document_type=(
+                        record["document_type"]
+                    ),
+                    document_name=(
+                        record["document_name"]
+                    ),
+                    is_primary=(
+                        record["is_primary"]
                     ),
                     item_number=(
                         record["item_number"]

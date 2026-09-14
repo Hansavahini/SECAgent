@@ -30,7 +30,9 @@ class FilingDownloader:
 
     ARCHIVE_ROOT = "https://www.sec.gov/Archives/edgar/data"
 
-    _ILLEGAL_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+    _ILLEGAL_FILENAME_CHARS = re.compile(
+        r'[<>:"/\\|?*\x00-\x1f]'
+    )
 
     def __init__(self, client=None):
         self.client = client or SECClient()
@@ -44,7 +46,11 @@ class FilingDownloader:
 
     @staticmethod
     def _accession_clean(accession_number):
-        return str(accession_number).replace("-", "").strip()
+        return (
+            str(accession_number)
+            .replace("-", "")
+            .strip()
+        )
 
     @staticmethod
     def _cik_from_accession(accession_number):
@@ -52,26 +58,43 @@ class FilingDownloader:
         Example:
             0001141391-26-000037 -> 1141391
         """
-        head = str(accession_number).strip().split("-")[0]
+
+        head = (
+            str(accession_number)
+            .strip()
+            .split("-")[0]
+        )
 
         if not head.isdigit():
             return None
 
         return int(head)
 
-    def _candidate_ciks(self, cik, accession_number):
+    def _candidate_ciks(
+        self,
+        cik,
+        accession_number,
+    ):
         candidates = []
 
         for value in (
             cik,
-            self._cik_from_accession(accession_number),
+            self._cik_from_accession(
+                accession_number
+            ),
         ):
             if value in (None, ""):
                 continue
 
             try:
-                numeric = int(str(value).strip())
-            except (TypeError, ValueError):
+                numeric = int(
+                    str(value).strip()
+                )
+
+            except (
+                TypeError,
+                ValueError,
+            ):
                 continue
 
             if numeric not in candidates:
@@ -88,6 +111,7 @@ class FilingDownloader:
         """
         Parse <DOCUMENT> stanzas from an EDGAR filing header.
         """
+
         unescaped = html.unescape(text)
 
         documents = []
@@ -105,7 +129,11 @@ class FilingDownloader:
                     re.IGNORECASE,
                 )
 
-                return match.group(1).strip() if match else ""
+                return (
+                    match.group(1).strip()
+                    if match
+                    else ""
+                )
 
             filename = field("FILENAME")
 
@@ -115,30 +143,45 @@ class FilingDownloader:
             documents.append(
                 {
                     "type": field("TYPE"),
-                    "sequence": field("SEQUENCE"),
+                    "sequence": field(
+                        "SEQUENCE"
+                    ),
                     "filename": filename,
-                    "description": field("DESCRIPTION"),
+                    "description": field(
+                        "DESCRIPTION"
+                    ),
                 }
             )
 
         return documents
 
-    def _load_filing(self, cik, accession_number):
+    def _load_filing(
+        self,
+        cik,
+        accession_number,
+    ):
         """
         Return:
             (base_url, documents)
 
         Results are cached by accession number.
         """
-        accession_number = str(accession_number).strip()
 
-        cached = self._filing_cache.get(accession_number)
+        accession_number = str(
+            accession_number
+        ).strip()
+
+        cached = self._filing_cache.get(
+            accession_number
+        )
 
         if cached is not None:
             return cached
 
-        accession_clean = self._accession_clean(
-            accession_number
+        accession_clean = (
+            self._accession_clean(
+                accession_number
+            )
         )
 
         attempted = []
@@ -157,40 +200,58 @@ class FilingDownloader:
 
             header_url = (
                 f"{base_url}/"
-                f"{accession_number}-index-headers.html"
+                f"{accession_number}"
+                f"-index-headers.html"
             )
 
-            attempted.append(header_url)
+            attempted.append(
+                header_url
+            )
 
             try:
                 response = self.client.get(
                     header_url,
-                    allow_status=(403, 404),
+                    allow_status=(
+                        403,
+                        404,
+                    ),
                 )
 
-            except requests.exceptions.RequestException as exc:
+            except (
+                requests.exceptions
+                .RequestException
+            ) as exc:
                 last_error = exc
                 continue
 
             if response.status_code != 200:
                 continue
 
-            documents = self._parse_documents(
-                response.text
+            documents = (
+                self._parse_documents(
+                    response.text
+                )
             )
 
             if not documents:
-                documents = self._documents_from_index_json(
-                    base_url
+                documents = (
+                    self._documents_from_index_json(
+                        base_url
+                    )
                 )
 
             if documents:
-                self._filing_cache[accession_number] = (
+                self._filing_cache[
+                    accession_number
+                ] = (
                     base_url,
                     documents,
                 )
 
-                return base_url, documents
+                return (
+                    base_url,
+                    documents,
+                )
 
         # Fallback to SEC archive directory JSON.
         for candidate in self._candidate_ciks(
@@ -204,26 +265,37 @@ class FilingDownloader:
                 f"{accession_clean}"
             )
 
-            documents = self._documents_from_index_json(
-                base_url
+            documents = (
+                self._documents_from_index_json(
+                    base_url
+                )
             )
 
             if documents:
-                self._filing_cache[accession_number] = (
+                self._filing_cache[
+                    accession_number
+                ] = (
                     base_url,
                     documents,
                 )
 
-                return base_url, documents
+                return (
+                    base_url,
+                    documents,
+                )
 
         message = (
-            f"Could not locate SEC archive directory "
+            "Could not locate SEC archive "
+            "directory "
             f"for accession {accession_number} "
-            f"(tried: {', '.join(attempted) or 'none'})"
+            f"(tried: "
+            f"{', '.join(attempted) or 'none'})"
         )
 
         if last_error is not None:
-            raise ValueError(message) from last_error
+            raise ValueError(
+                message
+            ) from last_error
 
         raise ValueError(message)
 
@@ -234,18 +306,28 @@ class FilingDownloader:
         """
         Directory listing fallback.
 
-        Gives real filenames when filing headers cannot be parsed.
+        Gives real filenames when filing headers
+        cannot be parsed.
         """
+
         try:
             response = self.client.get(
                 f"{base_url}/index.json",
                 headers={
-                    "Accept": "application/json"
+                    "Accept": (
+                        "application/json"
+                    )
                 },
-                allow_status=(403, 404),
+                allow_status=(
+                    403,
+                    404,
+                ),
             )
 
-        except requests.exceptions.RequestException:
+        except (
+            requests.exceptions
+            .RequestException
+        ):
             return []
 
         if response.status_code != 200:
@@ -253,11 +335,17 @@ class FilingDownloader:
 
         try:
             payload = response.json()
+
         except ValueError:
             return []
 
         items = (
-            (payload.get("directory") or {})
+            (
+                payload.get(
+                    "directory"
+                )
+                or {}
+            )
             .get("item")
             or []
         )
@@ -265,7 +353,6 @@ class FilingDownloader:
         documents = []
 
         for item in items:
-
             name = str(
                 item.get("name") or ""
             ).strip()
@@ -288,6 +375,42 @@ class FilingDownloader:
         return documents
 
     # -----------------------------------------------------------------
+    # Document discovery
+    # -----------------------------------------------------------------
+
+    def list_documents(
+        self,
+        cik,
+        accession_number,
+    ):
+        """
+        Return every SEC document belonging
+        to one filing.
+
+        Examples:
+            primary 8-K
+            EX-99.1
+            EX-10.1
+            graphics
+            XBRL documents
+        """
+
+        base_url, documents = (
+            self._load_filing(
+                cik,
+                accession_number,
+            )
+        )
+
+        return (
+            base_url,
+            [
+                dict(document)
+                for document in documents
+            ],
+        )
+
+    # -----------------------------------------------------------------
     # Document resolution
     # -----------------------------------------------------------------
 
@@ -308,9 +431,11 @@ class FilingDownloader:
         4. filename hint
         """
 
-        base_url, documents = self._load_filing(
-            cik,
-            accession_number,
+        base_url, documents = (
+            self._load_filing(
+                cik,
+                accession_number,
+            )
         )
 
         wanted_type = str(
@@ -319,7 +444,10 @@ class FilingDownloader:
 
         wanted_sequence = (
             str(sequence).strip()
-            if sequence not in (None, "")
+            if sequence not in (
+                None,
+                "",
+            )
             else ""
         )
 
@@ -327,55 +455,81 @@ class FilingDownloader:
             hint_filename or ""
         ).strip().lower()
 
-        if wanted_type and wanted_sequence:
-
+        if (
+            wanted_type
+            and wanted_sequence
+        ):
             for document in documents:
 
                 if (
-                    document["type"].upper()
+                    document[
+                        "type"
+                    ].upper()
                     == wanted_type
-                    and document["sequence"]
+                    and document[
+                        "sequence"
+                    ]
                     == wanted_sequence
                 ):
-                    return base_url, document
+                    return (
+                        base_url,
+                        document,
+                    )
 
         if wanted_sequence:
 
             for document in documents:
 
                 if (
-                    document["sequence"]
+                    document[
+                        "sequence"
+                    ]
                     == wanted_sequence
                 ):
-                    return base_url, document
+                    return (
+                        base_url,
+                        document,
+                    )
 
         if wanted_type:
 
             matches = [
                 document
-                for document in documents
+                for document
+                in documents
                 if (
-                    document["type"].upper()
+                    document[
+                        "type"
+                    ].upper()
                     == wanted_type
                 )
             ]
 
             if len(matches) == 1:
-                return base_url, matches[0]
+                return (
+                    base_url,
+                    matches[0],
+                )
 
         if wanted_hint:
 
             for document in documents:
 
                 if (
-                    document["filename"].lower()
+                    document[
+                        "filename"
+                    ].lower()
                     == wanted_hint
                 ):
-                    return base_url, document
+                    return (
+                        base_url,
+                        document,
+                    )
 
         available = ", ".join(
             (
-                f"seq={document['sequence'] or '?'}/"
+                f"seq="
+                f"{document['sequence'] or '?'}/"
                 f"{document['type'] or '?'}/"
                 f"{document['filename']}"
             )
@@ -383,7 +537,7 @@ class FilingDownloader:
         ) or "none"
 
         raise ValueError(
-            f"Document not found: "
+            "Document not found: "
             f"type={file_type}, "
             f"sequence={sequence}, "
             f"accession={accession_number}. "
@@ -401,12 +555,17 @@ class FilingDownloader:
         """
         Return the exact SEC filename for a document.
         """
-        _, document = self.resolve_document(
-            cik,
-            accession_number,
-            file_type=file_type,
-            sequence=sequence,
-            hint_filename=hint_filename,
+
+        _, document = (
+            self.resolve_document(
+                cik,
+                accession_number,
+                file_type=file_type,
+                sequence=sequence,
+                hint_filename=(
+                    hint_filename
+                ),
+            )
         )
 
         return document["filename"]
@@ -416,13 +575,23 @@ class FilingDownloader:
     # -----------------------------------------------------------------
 
     @classmethod
-    def _sanitize(cls, value):
-        cleaned = cls._ILLEGAL_FILENAME_CHARS.sub(
-            "-",
-            str(value or "").strip(),
+    def _sanitize(
+        cls,
+        value,
+    ):
+        cleaned = (
+            cls._ILLEGAL_FILENAME_CHARS
+            .sub(
+                "-",
+                str(value or "").strip(),
+            )
         )
 
-        return cleaned.rstrip(". ").strip()
+        return (
+            cleaned
+            .rstrip(". ")
+            .strip()
+        )
 
     def build_filename(
         self,
@@ -437,7 +606,10 @@ class FilingDownloader:
 
         extension = (
             Path(
-                str(original_filename or "")
+                str(
+                    original_filename
+                    or ""
+                )
             ).suffix
             or ".htm"
         )
@@ -447,7 +619,9 @@ class FilingDownloader:
         ).strip()
 
         if form_text == "8-K":
-            display_form = "8-K (Current report)"
+            display_form = (
+                "8-K (Current report)"
+            )
 
         elif form_text:
             display_form = form_text
@@ -456,13 +630,17 @@ class FilingDownloader:
             display_form = "Filing"
 
         parts = [
-            self._sanitize(display_form)
+            self._sanitize(
+                display_form
+            )
         ]
 
         if file_type:
             parts.append(
                 self._sanitize(
-                    str(file_type).replace(
+                    str(
+                        file_type
+                    ).replace(
                         "/",
                         "-",
                     )
@@ -470,7 +648,9 @@ class FilingDownloader:
             )
 
         parts.append(
-            self._sanitize(filing_date)
+            self._sanitize(
+                filing_date
+            )
         )
 
         stem = "_".join(
@@ -479,7 +659,9 @@ class FilingDownloader:
             if part
         )
 
-        return f"{stem}{extension}"
+        return (
+            f"{stem}{extension}"
+        )
 
     # -----------------------------------------------------------------
     # Download directory
@@ -494,11 +676,16 @@ class FilingDownloader:
         base = getattr(
             settings,
             "SEC_DOWNLOAD_DIR",
-            Path(settings.BASE_DIR)
+            Path(
+                settings.BASE_DIR
+            )
             / "downloads",
         )
 
-        return Path(base) / "filings"
+        return (
+            Path(base)
+            / "filings"
+        )
 
     def get_download_dir(
         self,
@@ -527,7 +714,9 @@ class FilingDownloader:
         base = getattr(
             settings,
             "SEC_DOWNLOAD_DIR",
-            Path(settings.BASE_DIR)
+            Path(
+                settings.BASE_DIR
+            )
             / "downloads",
         )
 
@@ -554,18 +743,29 @@ class FilingDownloader:
         accession number is added.
         """
 
-        path = directory / filename
+        path = (
+            directory
+            / filename
+        )
 
         if not path.exists():
             return path
 
-        stem = Path(filename).stem
-        extension = Path(filename).suffix
+        stem = (
+            Path(filename).stem
+        )
 
-        tagged = directory / (
-            f"{stem}_"
-            f"{self._sanitize(accession_number)}"
-            f"{extension}"
+        extension = (
+            Path(filename).suffix
+        )
+
+        tagged = (
+            directory
+            / (
+                f"{stem}_"
+                f"{self._sanitize(accession_number)}"
+                f"{extension}"
+            )
         )
 
         if not tagged.exists():
@@ -575,11 +775,14 @@ class FilingDownloader:
 
         while True:
 
-            candidate = directory / (
-                f"{stem}_"
-                f"{self._sanitize(accession_number)}"
-                f"_{counter}"
-                f"{extension}"
+            candidate = (
+                directory
+                / (
+                    f"{stem}_"
+                    f"{self._sanitize(accession_number)}"
+                    f"_{counter}"
+                    f"{extension}"
+                )
             )
 
             if not candidate.exists():
@@ -629,7 +832,9 @@ class FilingDownloader:
                     accession_number,
                     file_type=file_type,
                     sequence=sequence,
-                    hint_filename=hint_filename,
+                    hint_filename=(
+                        hint_filename
+                    ),
                 )
             )
 
@@ -642,13 +847,17 @@ class FilingDownloader:
             f"{sec_filename}"
         )
 
-        response = self.client.get(
-            file_url
+        response = (
+            self.client.get(
+                file_url
+            )
         )
 
-        directory = self.get_download_dir(
-            ticker=ticker,
-            form=form,
+        directory = (
+            self.get_download_dir(
+                ticker=ticker,
+                form=form,
+            )
         )
 
         directory.mkdir(
@@ -663,17 +872,21 @@ class FilingDownloader:
             or sec_filename
         )
 
-        target_path = self._unique_path(
-            directory,
-            target_name,
-            accession_number,
+        target_path = (
+            self._unique_path(
+                directory,
+                target_name,
+                accession_number,
+            )
         )
 
         # Atomic temporary write.
-        handle, temp_name = tempfile.mkstemp(
-            dir=str(directory),
-            prefix=".sec-",
-            suffix=".part",
+        handle, temp_name = (
+            tempfile.mkstemp(
+                dir=str(directory),
+                prefix=".sec-",
+                suffix=".part",
+            )
         )
 
         try:
@@ -695,7 +908,10 @@ class FilingDownloader:
         except BaseException:
 
             try:
-                os.unlink(temp_name)
+                os.unlink(
+                    temp_name
+                )
+
             except OSError:
                 pass
 
@@ -711,16 +927,23 @@ class FilingDownloader:
             ),
             "url": file_url,
             "sequence": (
-                document.get("sequence")
+                document.get(
+                    "sequence"
+                )
                 or (
                     str(sequence)
                     if sequence
-                    not in (None, "")
+                    not in (
+                        None,
+                        "",
+                    )
                     else ""
                 )
             ),
             "file_type": (
-                document.get("type")
+                document.get(
+                    "type"
+                )
                 or (
                     file_type
                     or ""

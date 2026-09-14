@@ -26,6 +26,11 @@ class RetrievalResult:
     form: str
     filing_date: date | None
     accession_number: str
+
+    document_type: str
+    document_name: str
+    is_primary: bool
+
     item_number: str
     section_title: str
     text: str
@@ -69,7 +74,9 @@ class VectorRetriever:
         version = self._get_embedding_version()
 
         query_vector = (
-            self.embedding_service.embed(query)
+            self.embedding_service.embed(
+                query
+            )
         )
 
         results = (
@@ -79,6 +86,7 @@ class VectorRetriever:
             )
             .select_related(
                 "chunk",
+                "chunk__document",
                 "chunk__filing",
                 "chunk__filing__company",
             )
@@ -87,14 +95,18 @@ class VectorRetriever:
         if ticker:
             results = results.filter(
                 chunk__filing__company__ticker=(
-                    str(ticker).strip().upper()
+                    str(ticker)
+                    .strip()
+                    .upper()
                 )
             )
 
         if form:
             results = results.filter(
                 chunk__filing__form=(
-                    str(form).strip().upper()
+                    str(form)
+                    .strip()
+                    .upper()
                 )
             )
 
@@ -133,58 +145,93 @@ class VectorRetriever:
             )[:top_k]
         )
 
-        return [
-            RetrievalResult(
-                chunk_id=row.chunk_id,
-                ticker=(
-                    row.chunk.filing.company.ticker
-                ),
-                form=row.chunk.filing.form,
-                filing_date=(
-                    row.chunk.filing.filing_date
-                ),
-                accession_number=(
-                    row.chunk.filing.accession_number
-                ),
-                item_number=(
-                    row.chunk.item_number
-                ),
-                section_title=(
-                    row.chunk.section_title
-                ),
-                text=row.chunk.text,
-                distance=float(row.distance),
+        output = []
+
+        for row in results:
+            chunk = row.chunk
+            document = chunk.document
+            filing = chunk.filing
+
+            output.append(
+                RetrievalResult(
+                    chunk_id=chunk.id,
+                    ticker=(
+                        filing.company.ticker
+                    ),
+                    form=filing.form,
+                    filing_date=(
+                        filing.filing_date
+                    ),
+                    accession_number=(
+                        filing.accession_number
+                    ),
+                    document_type=(
+                        document.document_type
+                        if document
+                        else ""
+                    ),
+                    document_name=(
+                        document.document_name
+                        if document
+                        else ""
+                    ),
+                    is_primary=(
+                        document.is_primary
+                        if document
+                        else False
+                    ),
+                    item_number=(
+                        chunk.item_number
+                    ),
+                    section_title=(
+                        chunk.section_title
+                    ),
+                    text=chunk.text,
+                    distance=float(
+                        row.distance
+                    ),
+                )
             )
-            for row in results
-        ]
+
+        return output
 
     def _get_embedding_version(
         self,
     ) -> EmbeddingVersion:
 
         try:
-            return EmbeddingVersion.objects.get(
-                provider="ollama",
-                model_name=(
-                    self.embedding_service.model_name
-                ),
-                dimensions=(
-                    self.embedding_service.dimensions
-                ),
-                chunker_version=(
-                    EmbeddingIndexer.CHUNKER_VERSION
-                ),
-                is_active=True,
+            return (
+                EmbeddingVersion.objects.get(
+                    provider="ollama",
+                    model_name=(
+                        self.embedding_service
+                        .model_name
+                    ),
+                    dimensions=(
+                        self.embedding_service
+                        .dimensions
+                    ),
+                    chunker_version=(
+                        EmbeddingIndexer
+                        .CHUNKER_VERSION
+                    ),
+                    is_active=True,
+                )
             )
 
-        except EmbeddingVersion.DoesNotExist as exc:
+        except (
+            EmbeddingVersion.DoesNotExist
+        ) as exc:
             raise RetrievalError(
                 "Active embedding version "
                 "was not found."
             ) from exc
 
-        except EmbeddingVersion.MultipleObjectsReturned as exc:
+        except (
+            EmbeddingVersion
+            .MultipleObjectsReturned
+        ) as exc:
             raise RetrievalError(
-                "Multiple active embedding versions "
-                "were found."
+                "Multiple active embedding "
+                "versions were found."
             ) from exc

@@ -27,6 +27,11 @@ class KeywordRetrievalResult:
     form: str
     filing_date: date | None
     accession_number: str
+
+    document_type: str
+    document_name: str
+    is_primary: bool
+
     item_number: str
     section_title: str
     text: str
@@ -91,6 +96,7 @@ class KeywordRetriever:
         results = (
             FilingChunk.objects
             .select_related(
+                "document",
                 "filing",
                 "filing__company",
             )
@@ -127,14 +133,18 @@ class KeywordRetriever:
         if ticker:
             results = results.filter(
                 filing__company__ticker=(
-                    str(ticker).strip().upper()
+                    str(ticker)
+                    .strip()
+                    .upper()
                 )
             )
 
         if form:
             results = results.filter(
                 filing__form=(
-                    str(form).strip().upper()
+                    str(form)
+                    .strip()
+                    .upper()
                 )
             )
 
@@ -147,12 +157,16 @@ class KeywordRetriever:
 
         if date_from:
             results = results.filter(
-                filing__filing_date__gte=date_from
+                filing__filing_date__gte=(
+                    date_from
+                )
             )
 
         if date_to:
             results = results.filter(
-                filing__filing_date__lte=date_to
+                filing__filing_date__lte=(
+                    date_to
+                )
             )
 
         results = results.order_by(
@@ -160,19 +174,50 @@ class KeywordRetriever:
             "id",
         )[:top_k]
 
-        return [
-            KeywordRetrievalResult(
-                chunk_id=row.id,
-                ticker=row.filing.company.ticker,
-                form=row.filing.form,
-                filing_date=row.filing.filing_date,
-                accession_number=(
-                    row.filing.accession_number
-                ),
-                item_number=row.item_number,
-                section_title=row.section_title,
-                text=row.text,
-                rank=float(row.keyword_score),
+        output = []
+
+        for row in results:
+            document = row.document
+
+            output.append(
+                KeywordRetrievalResult(
+                    chunk_id=row.id,
+                    ticker=(
+                        row.filing.company.ticker
+                    ),
+                    form=row.filing.form,
+                    filing_date=(
+                        row.filing.filing_date
+                    ),
+                    accession_number=(
+                        row.filing.accession_number
+                    ),
+                    document_type=(
+                        document.document_type
+                        if document
+                        else ""
+                    ),
+                    document_name=(
+                        document.document_name
+                        if document
+                        else ""
+                    ),
+                    is_primary=(
+                        document.is_primary
+                        if document
+                        else False
+                    ),
+                    item_number=(
+                        row.item_number
+                    ),
+                    section_title=(
+                        row.section_title
+                    ),
+                    text=row.text,
+                    rank=float(
+                        row.keyword_score
+                    ),
+                )
             )
-            for row in results
-        ]
+
+        return output

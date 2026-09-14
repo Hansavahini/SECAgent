@@ -238,10 +238,10 @@ class FilingChunk(models.Model):
         constraints = [
             models.UniqueConstraint(
                 fields=[
-                    "filing",
+                    "document",
                     "chunk_index",
                 ],
-                name="uq_filing_chunk",
+                name="uq_document_chunk",
             )
         ]
 

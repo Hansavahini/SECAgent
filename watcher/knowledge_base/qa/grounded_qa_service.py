@@ -18,10 +18,16 @@ class GroundedQAError(Exception):
 class GroundedCitation:
     source_id: str
     chunk_id: int
+
     ticker: str
     form: str
     filing_date: date | None
     accession_number: str
+
+    document_type: str
+    document_name: str
+    is_primary: bool
+
     item_number: str
     section_title: str
 
@@ -65,7 +71,9 @@ class GroundedQAService:
         top_k=6,
     ) -> GroundedAnswer:
 
-        question = str(question or "").strip()
+        question = str(
+            question or ""
+        ).strip()
 
         if not question:
             raise GroundedQAError(
@@ -95,10 +103,14 @@ class GroundedQAService:
             evidence,
         )
 
-        answer = self.generation_service.generate(
-            prompt,
-            temperature=0.0,
-        ).strip()
+        answer = (
+            self.generation_service
+            .generate(
+                prompt,
+                temperature=0.0,
+            )
+            .strip()
+        )
 
         if answer == self.NO_ANSWER:
             return GroundedAnswer(
@@ -108,9 +120,11 @@ class GroundedQAService:
                 found=False,
             )
 
-        citation_numbers = self._extract_citations(
-            answer,
-            len(evidence),
+        citation_numbers = (
+            self._extract_citations(
+                answer,
+                len(evidence),
+            )
         )
 
         if not citation_numbers:
@@ -122,19 +136,40 @@ class GroundedQAService:
         citations = []
 
         for number in citation_numbers:
-            result = evidence[number - 1]
+            result = evidence[
+                number - 1
+            ]
 
             citations.append(
                 GroundedCitation(
                     source_id=f"S{number}",
-                    chunk_id=result.chunk_id,
-                    ticker=result.ticker,
-                    form=result.form,
-                    filing_date=result.filing_date,
+                    chunk_id=(
+                        result.chunk_id
+                    ),
+                    ticker=(
+                        result.ticker
+                    ),
+                    form=(
+                        result.form
+                    ),
+                    filing_date=(
+                        result.filing_date
+                    ),
                     accession_number=(
                         result.accession_number
                     ),
-                    item_number=result.item_number,
+                    document_type=(
+                        result.document_type
+                    ),
+                    document_name=(
+                        result.document_name
+                    ),
+                    is_primary=(
+                        result.is_primary
+                    ),
+                    item_number=(
+                        result.item_number
+                    ),
                     section_title=(
                         result.section_title
                     ),
@@ -160,35 +195,53 @@ class GroundedQAService:
             evidence,
             start=1,
         ):
+            source_lines = [
+                f"[S{number}]",
+                f"Ticker: {result.ticker}",
+                f"Form: {result.form}",
+                (
+                    "Filing date: "
+                    f"{result.filing_date}"
+                ),
+                (
+                    "Accession: "
+                    f"{result.accession_number}"
+                ),
+                (
+                    "Document type: "
+                    f"{result.document_type}"
+                ),
+                (
+                    "Document name: "
+                    f"{result.document_name}"
+                ),
+                (
+                    "Primary document: "
+                    f"{result.is_primary}"
+                ),
+                (
+                    "SEC Item: "
+                    f"{result.item_number or '<none>'}"
+                ),
+                (
+                    "Section: "
+                    f"{result.section_title or '<none>'}"
+                ),
+                "Text:",
+                result.text,
+            ]
+
             sources.append(
                 "\n".join(
-                    [
-                        f"[S{number}]",
-                        f"Ticker: {result.ticker}",
-                        f"Form: {result.form}",
-                        (
-                            "Filing date: "
-                            f"{result.filing_date}"
-                        ),
-                        (
-                            "Accession: "
-                            f"{result.accession_number}"
-                        ),
-                        (
-                            "SEC Item: "
-                            f"{result.item_number}"
-                        ),
-                        (
-                            "Section: "
-                            f"{result.section_title}"
-                        ),
-                        "Text:",
-                        result.text,
-                    ]
+                    source_lines
                 )
             )
 
-        evidence_text = "\n\n".join(sources)
+        evidence_text = (
+            "\n\n".join(
+                sources
+            )
+        )
 
         return f"""
 You are an SEC filing evidence assistant.
@@ -201,7 +254,13 @@ STRICT RULES:
 4. Every factual statement must include at least one
    evidence citation such as [S1] or [S2].
 5. Use only source labels that appear below.
-6. If the evidence does not contain enough information
+6. Prefer the source containing the actual disclosed
+   information over a source that merely references
+   another document.
+7. When an exhibit contains the actual financial results,
+   use the exhibit evidence rather than merely saying
+   that a press release was attached.
+8. If the evidence does not contain enough information
    to answer the question, respond with exactly:
 
 {self.NO_ANSWER}
@@ -235,13 +294,21 @@ ANSWER:
         for value in matches:
             number = int(value)
 
-            if number < 1 or number > evidence_count:
+            if (
+                number < 1
+                or number > evidence_count
+            ):
                 raise GroundedQAError(
                     "Model referenced an invalid "
                     f"evidence source: S{number}."
                 )
 
-            if number not in citation_numbers:
-                citation_numbers.append(number)
+            if (
+                number
+                not in citation_numbers
+            ):
+                citation_numbers.append(
+                    number
+                )
 
         return citation_numbers

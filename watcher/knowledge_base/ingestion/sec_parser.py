@@ -16,12 +16,13 @@ class SECParser:
         r"(?im)^[ \t]*"
         r"item[ \t]+"
         r"(?P<number>\d{1,2}(?:\.\d{2})?[A-Z]?)"
-        r"[ \t]*[\.\:\-–—]?[ \t]*"
+        r"[ \t]*[\.\:\-\u2013\u2014]?[ \t]*"
         r"(?P<title>[^\n]*)"
         r"$"
     )
 
     MIN_DUPLICATE_BODY_CHARS = 200
+    MAX_SECTION_TITLE_CHARS = 300
 
     def parse(self, text: str) -> list[SECSection]:
         if not isinstance(text, str):
@@ -58,13 +59,19 @@ class SECParser:
                 else len(text)
             )
 
-            number = match.group("number").upper()
+            number = (
+                match.group("number")
+                .upper()
+            )
 
-            title = (
+            title = self._clean_title(
                 match.group("title") or ""
-            ).strip()
+            )
 
-            section_text = text[start:end].strip()
+            section_text = (
+                text[start:end]
+                .strip()
+            )
 
             if not section_text:
                 continue
@@ -79,7 +86,27 @@ class SECParser:
                 )
             )
 
-        return self._remove_toc_duplicates(sections)
+        return self._remove_toc_duplicates(
+            sections
+        )
+
+    def _clean_title(
+        self,
+        title: str,
+    ) -> str:
+        title = re.sub(
+            r"\s+",
+            " ",
+            str(title or ""),
+        ).strip()
+
+        if (
+            len(title)
+            > self.MAX_SECTION_TITLE_CHARS
+        ):
+            return ""
+
+        return title
 
     def _remove_toc_duplicates(
         self,
@@ -89,8 +116,13 @@ class SECParser:
         occurrence_counts = {}
 
         for section in sections:
-            occurrence_counts[section.item_number] = (
-                occurrence_counts.get(section.item_number, 0)
+            occurrence_counts[
+                section.item_number
+            ] = (
+                occurrence_counts.get(
+                    section.item_number,
+                    0,
+                )
                 + 1
             )
 
@@ -98,7 +130,10 @@ class SECParser:
 
         for section in sections:
             duplicated = (
-                occurrence_counts[section.item_number] > 1
+                occurrence_counts[
+                    section.item_number
+                ]
+                > 1
             )
 
             if (
