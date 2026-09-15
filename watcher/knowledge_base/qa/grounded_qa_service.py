@@ -43,6 +43,9 @@ class GroundedAnswer:
 class GroundedQAService:
     NO_ANSWER = "NOT_FOUND_IN_SEC_EVIDENCE"
 
+    GENERATION_EVIDENCE_LIMIT = 3
+    MAX_CHARS_PER_SOURCE = 1800
+
     def __init__(
         self,
         *,
@@ -80,7 +83,7 @@ class GroundedQAService:
                 "Question cannot be empty."
             )
 
-        evidence = self.retriever.search(
+        retrieved_evidence = self.retriever.search(
             question,
             ticker=ticker,
             form=form,
@@ -90,13 +93,17 @@ class GroundedQAService:
             top_k=top_k,
         )
 
-        if not evidence:
+        if not retrieved_evidence:
             return GroundedAnswer(
                 answer=self.NO_ANSWER,
                 citations=[],
                 evidence_count=0,
                 found=False,
             )
+
+        evidence = self._prepare_generation_evidence(
+            retrieved_evidence
+        )
 
         prompt = self._build_prompt(
             question,
@@ -127,6 +134,41 @@ class GroundedQAService:
             )
         )
 
+        # Small local models can ignore formatting on the
+        # first attempt. If so, discard the uncited answer
+        # and regenerate from evidence only.
+        if not citation_numbers:
+            repair_prompt = (
+                self._build_citation_repair_prompt(
+                    question=question,
+                    evidence=evidence,
+                )
+            )
+
+            answer = (
+                self.generation_service
+                .generate(
+                    repair_prompt,
+                    temperature=0.0,
+                )
+                .strip()
+            )
+
+            if answer == self.NO_ANSWER:
+                return GroundedAnswer(
+                    answer=answer,
+                    citations=[],
+                    evidence_count=len(evidence),
+                    found=False,
+                )
+
+            citation_numbers = (
+                self._extract_citations(
+                    answer,
+                    len(evidence),
+                )
+            )
+
         if not citation_numbers:
             raise GroundedQAError(
                 "Model returned an answer without "
@@ -143,18 +185,10 @@ class GroundedQAService:
             citations.append(
                 GroundedCitation(
                     source_id=f"S{number}",
-                    chunk_id=(
-                        result.chunk_id
-                    ),
-                    ticker=(
-                        result.ticker
-                    ),
-                    form=(
-                        result.form
-                    ),
-                    filing_date=(
-                        result.filing_date
-                    ),
+                    chunk_id=result.chunk_id,
+                    ticker=result.ticker,
+                    form=result.form,
+                    filing_date=result.filing_date,
                     accession_number=(
                         result.accession_number
                     ),
@@ -181,6 +215,37 @@ class GroundedQAService:
             citations=citations,
             evidence_count=len(evidence),
             found=True,
+        )
+
+    def _prepare_generation_evidence(
+        self,
+        evidence,
+    ):
+        return list(
+            evidence[
+                :self.GENERATION_EVIDENCE_LIMIT
+            ]
+        )
+
+    def _trim_text(
+        self,
+        text,
+    ) -> str:
+        value = str(
+            text or ""
+        ).strip()
+
+        if (
+            len(value)
+            <= self.MAX_CHARS_PER_SOURCE
+        ):
+            return value
+
+        return (
+            value[
+                :self.MAX_CHARS_PER_SOURCE
+            ].rstrip()
+            + "\n[TRUNCATED]"
         )
 
     def _build_prompt(
@@ -216,10 +281,6 @@ class GroundedQAService:
                     f"{result.document_name}"
                 ),
                 (
-                    "Primary document: "
-                    f"{result.is_primary}"
-                ),
-                (
                     "SEC Item: "
                     f"{result.item_number or '<none>'}"
                 ),
@@ -228,7 +289,9 @@ class GroundedQAService:
                     f"{result.section_title or '<none>'}"
                 ),
                 "Text:",
-                result.text,
+                self._trim_text(
+                    result.text
+                ),
             ]
 
             sources.append(
@@ -237,35 +300,39 @@ class GroundedQAService:
                 )
             )
 
-        evidence_text = (
-            "\n\n".join(
-                sources
+        evidence_text = "\n\n".join(
+            sources
+        )
+
+        allowed_labels = ", ".join(
+            f"[S{number}]"
+            for number in range(
+                1,
+                len(evidence) + 1,
             )
         )
 
         return f"""
-You are an SEC filing evidence assistant.
+You answer questions using SEC filing evidence.
 
-STRICT RULES:
+Use ONLY the evidence below.
 
-1. Answer ONLY from the SEC evidence below.
-2. Do not use general knowledge or prior knowledge.
-3. Do not invent facts, numbers, dates, or conclusions.
-4. Every factual statement must include at least one
-   evidence citation such as [S1] or [S2].
-5. Use only source labels that appear below.
-6. Prefer the source containing the actual disclosed
-   information over a source that merely references
-   another document.
-7. When an exhibit contains the actual financial results,
-   use the exhibit evidence rather than merely saying
-   that a press release was attached.
-8. If the evidence does not contain enough information
-   to answer the question, respond with exactly:
+Allowed source labels:
+{allowed_labels}
+
+Important:
+- Use ONLY these exact source labels.
+- Never write [S#].
+- Never invent a source.
+- Every factual sentence must end with at least one
+  source label such as [S1].
+- Do not use outside knowledge.
+- Do not invent numbers.
+- Keep the answer concise.
+- Answer the user's actual question.
+- If the evidence is insufficient, return exactly:
 
 {self.NO_ANSWER}
-
-Do not add anything else when using that response.
 
 QUESTION:
 
@@ -275,7 +342,86 @@ SEC EVIDENCE:
 
 {evidence_text}
 
-ANSWER:
+Return a concise factual answer with valid source labels.
+""".strip()
+
+    def _build_citation_repair_prompt(
+        self,
+        *,
+        question,
+        evidence,
+    ) -> str:
+
+        sources = []
+
+        for number, result in enumerate(
+            evidence,
+            start=1,
+        ):
+            sources.append(
+                "\n".join(
+                    [
+                        f"[S{number}]",
+                        (
+                            f"Form: "
+                            f"{result.form}"
+                        ),
+                        (
+                            f"Date: "
+                            f"{result.filing_date}"
+                        ),
+                        (
+                            f"Section: "
+                            f"{result.section_title}"
+                        ),
+                        "Text:",
+                        self._trim_text(
+                            result.text
+                        ),
+                    ]
+                )
+            )
+
+        evidence_text = "\n\n".join(
+            sources
+        )
+
+        allowed_labels = ", ".join(
+            f"[S{number}]"
+            for number in range(
+                1,
+                len(evidence) + 1,
+            )
+        )
+
+        return f"""
+Answer the SEC question below.
+
+Allowed citations are ONLY:
+{allowed_labels}
+
+Rules:
+- Use ONLY the supplied SEC evidence.
+- Every factual sentence MUST end with one of the
+  allowed citations.
+- Never output [S#].
+- Never invent a citation.
+- Never invent a number.
+- Do not repeat filing metadata unless relevant.
+- Keep the answer short and directly responsive.
+- If the evidence is insufficient, return exactly:
+
+{self.NO_ANSWER}
+
+QUESTION:
+
+{question}
+
+SEC EVIDENCE:
+
+{evidence_text}
+
+Return ONLY the cited answer.
 """.strip()
 
     def _extract_citations(

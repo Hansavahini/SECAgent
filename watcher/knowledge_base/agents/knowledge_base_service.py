@@ -1,6 +1,11 @@
 from dataclasses import dataclass
 from typing import Any
 
+from watcher.knowledge_base.agents.company_resolver import (
+    CompanyResolution,
+    CompanyResolver,
+    CompanyResolverError,
+)
 from watcher.knowledge_base.agents.intent_router import (
     IntentRouter,
     KnowledgeIntent,
@@ -26,31 +31,40 @@ class KnowledgeBaseResult:
     status: str
     result: Any | None
     message: str
+    resolved_company: CompanyResolution | None = None
 
 
 class KnowledgeBaseService:
     """
     Unified internal entry point for SEC knowledge-base requests.
 
-    Routes:
-        NORMAL_QA
+    Flow:
+        question
+            -> CompanyResolver
+            -> IntentRouter
             -> GroundedQAService
+               OR CompanySummaryService
+               OR ChangeDetectionService
 
-        COMPANY_SUMMARY
-            -> CompanySummaryService
-
-        CHANGE_DETECTION
-            -> ChangeDetectionService
+    The caller may supply a ticker explicitly, but it is
+    no longer required when the company can be resolved
+    from the natural-language question.
     """
 
     def __init__(
         self,
         *,
+        company_resolver=None,
         intent_router=None,
         qa_service=None,
         company_summary_service=None,
         change_detection_service=None,
     ):
+        self.company_resolver = (
+            company_resolver
+            or CompanyResolver()
+        )
+
         self.intent_router = (
             intent_router
             or IntentRouter()
@@ -75,34 +89,53 @@ class KnowledgeBaseService:
         self,
         question: str,
         *,
-        ticker: str,
+        ticker: str | None = None,
         form: str | None = None,
         start_date=None,
         end_date=None,
         top_k: int = 6,
     ) -> KnowledgeBaseResult:
 
-        question = str(question or "").strip()
-        ticker = str(ticker or "").strip().upper()
+        question = str(
+            question or ""
+        ).strip()
 
         if not question:
             raise KnowledgeBaseServiceError(
                 "Question cannot be empty."
             )
 
-        if not ticker:
-            raise KnowledgeBaseServiceError(
-                "Ticker cannot be empty."
+        try:
+            company = self.company_resolver.resolve(
+                question,
+                ticker=ticker,
             )
+        except CompanyResolverError as exc:
+            raise KnowledgeBaseServiceError(
+                str(exc)
+            ) from exc
+
+        resolved_ticker = (
+            company.ticker
+            .strip()
+            .upper()
+        )
 
         route = self.intent_router.route(
             question
         )
 
+        effective_form = (
+            str(form).strip().upper()
+            if form
+            else route.detected_form
+        )
+
         if route.intent == KnowledgeIntent.NORMAL_QA:
             qa_result = self.qa_service.answer(
                 question,
-                ticker=ticker,
+                ticker=resolved_ticker,
+                form=effective_form,
                 top_k=top_k,
             )
 
@@ -111,23 +144,18 @@ class KnowledgeBaseService:
                 status="completed",
                 result=qa_result,
                 message=route.reason,
+                resolved_company=company,
             )
 
         if (
             route.intent
             == KnowledgeIntent.COMPANY_SUMMARY
         ):
-            summary_form = (
-                str(form).strip().upper()
-                if form
-                else route.detected_form
-            )
-
             summary_result = (
                 self.company_summary_service
                 .summarize_company(
-                    ticker,
-                    form=summary_form,
+                    resolved_ticker,
+                    form=effective_form,
                     start_date=start_date,
                     end_date=end_date,
                 )
@@ -138,19 +166,14 @@ class KnowledgeBaseService:
                 status="completed",
                 result=summary_result,
                 message=route.reason,
+                resolved_company=company,
             )
 
         if (
             route.intent
             == KnowledgeIntent.CHANGE_DETECTION
         ):
-            comparison_form = (
-                str(form).strip().upper()
-                if form
-                else route.detected_form
-            )
-
-            if not comparison_form:
+            if not effective_form:
                 raise KnowledgeBaseServiceError(
                     "Change detection requires an SEC form "
                     "such as 8-K, 10-Q, or 10-K."
@@ -159,8 +182,8 @@ class KnowledgeBaseService:
             change_result = (
                 self.change_detection_service
                 .compare_latest(
-                    ticker,
-                    form=comparison_form,
+                    resolved_ticker,
+                    form=effective_form,
                 )
             )
 
@@ -169,6 +192,7 @@ class KnowledgeBaseService:
                 status="completed",
                 result=change_result,
                 message=route.reason,
+                resolved_company=company,
             )
 
         raise KnowledgeBaseServiceError(

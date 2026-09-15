@@ -2,7 +2,9 @@ import json
 
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
-
+from watcher.knowledge_base.qa.grounded_qa_service import (
+    GroundedQAError,
+)
 from watcher.knowledge_base.agents.knowledge_base_service import (
     KnowledgeBaseService,
     KnowledgeBaseServiceError,
@@ -283,6 +285,7 @@ def ask_knowledge_base(request):
         CompanySummaryError,
         ChangeDetectionError,
         SummaryCitationError,
+        GroundedQAError,
         ValueError,
     ) as exc:
         return JsonResponse(

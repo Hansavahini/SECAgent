@@ -1,9 +1,15 @@
+import hashlib
 from dataclasses import dataclass
+
+from django.db import transaction
 
 from watcher.knowledge_base.generation.ollama_generation_service import (
     OllamaGenerationService,
 )
-from watcher.knowledge_base.models import FilingDocument
+from watcher.knowledge_base.models import (
+    DocumentSummaryCache,
+    FilingDocument,
+)
 from watcher.knowledge_base.summarization.summary_citation import (
     SummaryCitation,
     build_summary_citation,
@@ -33,17 +39,28 @@ class DocumentSummary:
 
 class DocumentSummaryService:
     """
-    Summarizes every chunk belonging to one FilingDocument.
+    Generates and persistently caches one concise summary
+    for each SEC FilingDocument.
 
     Flow:
-        chunks
-        -> chunk batches
-        -> partial summaries
-        -> final document summary
+
+        FilingDocument
+            -> build content signature
+            -> valid PostgreSQL cache?
+                YES -> reuse stored summary
+                NO  -> summarize all chunks
+                       -> store DocumentSummaryCache
+                       -> return summary
+
+    The original SEC document text is NOT copied into the
+    summary table.
     """
 
-    DEFAULT_MAX_BATCH_CHARS = 12000
-    REDUCE_GROUP_SIZE = 4
+    SUMMARY_PIPELINE_VERSION = "sec-document-summary-v4"
+    DEFAULT_MAX_BATCH_CHARS = 40000
+    BATCH_MAX_TOKENS = 384
+    FINAL_MAX_TOKENS = 1024
+    REDUCE_GROUP_SIZE = 8
 
     def __init__(
         self,
@@ -105,6 +122,34 @@ class DocumentSummaryService:
             for chunk in chunks
         )
 
+        content_signature = (
+            self._build_content_signature(
+                document=document,
+                chunks=chunks,
+            )
+        )
+
+        model_name = self._model_name()
+
+        cached = (
+            DocumentSummaryCache.objects
+            .filter(
+                document=document,
+                content_signature=content_signature,
+                model_name=model_name,
+                prompt_version=self.SUMMARY_PIPELINE_VERSION,
+            )
+            .first()
+        )
+
+        if cached is not None:
+            return self._build_result(
+                document=document,
+                chunks=chunks,
+                citations=citations,
+                summary=cached.summary,
+            )
+
         citation_by_chunk_id = {
             citation.chunk_id: citation
             for citation in citations
@@ -128,6 +173,30 @@ class DocumentSummaryService:
             summaries=partial_summaries,
         )
 
+        self._store_cache(
+            document=document,
+            content_signature=content_signature,
+            model_name=model_name,
+            summary=final_summary,
+            chunk_count=len(chunks),
+        )
+
+        return self._build_result(
+            document=document,
+            chunks=chunks,
+            citations=citations,
+            summary=final_summary,
+        )
+
+    def _build_result(
+        self,
+        *,
+        document,
+        chunks,
+        citations,
+        summary,
+    ) -> DocumentSummary:
+
         filing = document.filing
 
         filing_date = (
@@ -147,13 +216,90 @@ class DocumentSummaryService:
             document_name=document.document_name,
             is_primary=document.is_primary,
             chunk_count=len(chunks),
-            summary=final_summary,
+            summary=summary,
             source_url=(
                 document.source_url
                 or filing.source_url
                 or ""
             ),
             citations=citations,
+        )
+
+    def _build_content_signature(
+        self,
+        *,
+        document,
+        chunks,
+    ) -> str:
+
+        digest = hashlib.sha256()
+
+        document_parts = (
+            str(document.id),
+            str(document.sequence or ""),
+            str(document.document_type or ""),
+            str(document.document_name or ""),
+            str(document.is_primary),
+            str(document.content_sha256 or ""),
+        )
+
+        digest.update(
+            "|".join(document_parts).encode("utf-8")
+        )
+
+        for chunk in chunks:
+            parts = (
+                str(chunk.id),
+                str(chunk.chunk_index),
+                str(chunk.item_number or ""),
+                str(chunk.section_title or ""),
+                str(chunk.content_sha256 or ""),
+            )
+
+            digest.update(b"\n")
+            digest.update(
+                "|".join(parts).encode("utf-8")
+            )
+
+        return digest.hexdigest()
+
+    def _store_cache(
+        self,
+        *,
+        document,
+        content_signature,
+        model_name,
+        summary,
+        chunk_count,
+    ):
+        with transaction.atomic():
+            DocumentSummaryCache.objects.update_or_create(
+                document=document,
+                defaults={
+                    "content_signature": content_signature,
+                    "model_name": model_name,
+                    "prompt_version": (
+                        self.SUMMARY_PIPELINE_VERSION
+                    ),
+                    "summary": summary,
+                    "chunk_count": chunk_count,
+                },
+            )
+
+    def _model_name(self) -> str:
+        value = getattr(
+            self.generation_service,
+            "model_name",
+            None,
+        )
+
+        if value:
+            return str(value)
+
+        return (
+            self.generation_service
+            .__class__
+            .__name__
         )
 
     def _build_chunk_batches(
@@ -174,14 +320,18 @@ class DocumentSummaryService:
             ]
 
             if chunk.item_number:
-                heading_parts.append(chunk.item_number)
+                heading_parts.append(
+                    chunk.item_number
+                )
 
             if chunk.section_title:
                 heading_parts.append(
                     chunk.section_title
                 )
 
-            heading = " | ".join(heading_parts)
+            heading = " | ".join(
+                heading_parts
+            )
 
             piece = (
                 f"{heading}\n"
@@ -221,20 +371,21 @@ class DocumentSummaryService:
         filing = document.filing
 
         prompt = f"""
-You are summarizing evidence from an SEC filing.
+You are summarizing evidence from an SEC filing document.
 
 Use ONLY the source text provided below.
 
 Rules:
 - Do not use outside knowledge.
 - Do not invent facts.
-- Preserve important numbers, dates, percentages and amounts.
+- Preserve material numbers, dates, percentages and amounts.
 - Preserve material risks, commitments and events.
 - Distinguish disclosed facts from management expectations.
-- Every factual statement should preserve its source label such as [C700].
-- Use only source labels that appear in the supplied text.
-- If information is not present, do not add it.
-- Keep the summary factual and concise.
+- Preserve SEC source labels such as [C700].
+- Use only source labels appearing in the supplied text.
+- Do not add information that is not present.
+- Remove unnecessary repetition.
+- Keep the result concise, factual and structured.
 
 Company: {filing.company.ticker}
 Form: {filing.form}
@@ -247,12 +398,13 @@ SOURCE TEXT
 -----------
 {batch_text}
 
-Return a structured factual summary with SEC source labels.
+Return a concise factual SEC document summary with source labels.
 """.strip()
 
         return self.generation_service.generate(
             prompt,
             temperature=0.0,
+            max_tokens=self.BATCH_MAX_TOKENS,
         )
 
     def _reduce_summaries(
@@ -265,6 +417,9 @@ Return a structured factual summary with SEC source labels.
             raise DocumentSummaryError(
                 "No partial summaries were generated."
             )
+
+        if len(summaries) == 1:
+            return summaries[0]
 
         current = list(summaries)
 
@@ -282,30 +437,34 @@ Return a structured factual summary with SEC source labels.
                 ]
 
                 if len(group) == 1:
-                    next_level.append(group[0])
+                    next_level.append(
+                        group[0]
+                    )
                     continue
 
                 combined = "\n\n".join(
                     f"[PART {index + 1}]\n{text}"
-                    for index, text in enumerate(group)
+                    for index, text
+                    in enumerate(group)
                 )
 
                 filing = document.filing
 
                 prompt = f"""
-Combine the partial SEC summaries below into one document summary.
+Combine the partial SEC document summaries below.
 
 Use ONLY the supplied partial summaries.
 
 Rules:
 - Do not invent facts.
 - Do not add outside knowledge.
-- Preserve material numbers, dates, risks and events.
-- Preserve all valid source labels such as [C700].
-- Never invent a source label.
+- Preserve material numbers, dates, percentages and amounts.
+- Preserve material risks, commitments and events.
+- Preserve valid SEC source labels.
+- Never invent source labels.
 - Remove repetition.
-- Keep different periods distinct.
-- Keep the result factual and organized.
+- Keep different reporting periods distinct.
+- Keep the final summary concise and factual.
 
 Company: {filing.company.ticker}
 Form: {filing.form}
@@ -317,17 +476,20 @@ PARTIAL SUMMARIES
 -----------------
 {combined}
 
-Return one consolidated document summary with source labels.
+Return one consolidated SEC document summary.
 """.strip()
 
                 reduced = (
                     self.generation_service.generate(
                         prompt,
                         temperature=0.0,
+                        max_tokens=self.FINAL_MAX_TOKENS,
                     )
                 )
 
-                next_level.append(reduced)
+                next_level.append(
+                    reduced
+                )
 
             current = next_level
 

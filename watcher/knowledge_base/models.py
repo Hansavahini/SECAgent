@@ -451,3 +451,183 @@ class IngestionJob(models.Model):
             f"{self.filing_id}:"
             f"{self.status}"
         )
+
+class CompanyAlias(models.Model):
+    company = models.ForeignKey(
+        Company,
+        on_delete=models.CASCADE,
+        related_name="aliases",
+    )
+
+    alias = models.CharField(
+        max_length=255,
+    )
+
+    normalized_alias = models.CharField(
+        max_length=255,
+        db_index=True,
+    )
+
+    source = models.CharField(
+        max_length=50,
+        default="system",
+    )
+
+    is_active = models.BooleanField(
+        default=True,
+        db_index=True,
+    )
+
+    created_at = models.DateTimeField(
+        auto_now_add=True,
+    )
+
+    updated_at = models.DateTimeField(
+        auto_now=True,
+    )
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=[
+                    "company",
+                    "normalized_alias",
+                ],
+                name="uq_company_normalized_alias",
+            ),
+        ]
+
+        indexes = [
+            models.Index(
+                fields=[
+                    "normalized_alias",
+                    "is_active",
+                ],
+                name="idx_company_alias_lookup",
+            ),
+        ]
+
+        ordering = [
+            "company_id",
+            "normalized_alias",
+        ]
+
+    def __str__(self):
+        return (
+            f"{self.company.ticker}: "
+            f"{self.alias}"
+        )
+
+class FilingSummaryCache(models.Model):
+    filing = models.OneToOneField(
+        Filing,
+        on_delete=models.CASCADE,
+        related_name="summary_cache",
+    )
+
+    content_signature = models.CharField(
+        max_length=64,
+        db_index=True,
+    )
+
+    model_name = models.CharField(
+        max_length=255,
+    )
+
+    prompt_version = models.CharField(
+        max_length=50,
+    )
+
+    summary = models.TextField()
+
+    document_count = models.PositiveIntegerField(
+        default=0,
+    )
+
+    chunk_count = models.PositiveIntegerField(
+        default=0,
+    )
+
+    created_at = models.DateTimeField(
+        auto_now_add=True,
+    )
+
+    updated_at = models.DateTimeField(
+        auto_now=True,
+    )
+
+    class Meta:
+        indexes = [
+            models.Index(
+                fields=[
+                    "model_name",
+                    "prompt_version",
+                ],
+                name="idx_filing_summary_version",
+            ),
+        ]
+
+    def __str__(self):
+        return (
+            f"{self.filing} "
+            f"[{self.model_name} / "
+            f"{self.prompt_version}]"
+        )
+class DocumentSummaryCache(models.Model):
+    """
+    Stores one concise generated summary for one SEC filing document.
+
+    The original document text remains in FilingDocument/FilingChunk.
+    This table stores only the derived summary and cache metadata.
+    """
+
+    document = models.OneToOneField(
+        FilingDocument,
+        on_delete=models.CASCADE,
+        related_name="summary_cache",
+    )
+
+    content_signature = models.CharField(
+        max_length=64,
+        db_index=True,
+    )
+
+    model_name = models.CharField(
+        max_length=255,
+    )
+
+    prompt_version = models.CharField(
+        max_length=50,
+    )
+
+    summary = models.TextField()
+
+    chunk_count = models.PositiveIntegerField(
+        default=0,
+    )
+
+    created_at = models.DateTimeField(
+        auto_now_add=True,
+    )
+
+    updated_at = models.DateTimeField(
+        auto_now=True,
+    )
+
+    class Meta:
+        indexes = [
+            models.Index(
+                fields=[
+                    "model_name",
+                    "prompt_version",
+                ],
+                name="idx_document_summary_version",
+            ),
+        ]
+
+    def __str__(self):
+        return (
+            f"{self.document} "
+            f"[{self.model_name} / "
+            f"{self.prompt_version}]"
+        )

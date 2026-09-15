@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import re
 from dataclasses import dataclass
 from enum import Enum
@@ -18,84 +20,57 @@ class IntentResult:
 
 class IntentRouter:
     """
-    Deterministic router for SEC knowledge-base requests.
+    Deterministic router for SEC knowledge-base questions.
 
-    Routes:
-        normal factual question -> GroundedQAService
-        whole-company summary   -> CompanySummaryService
-        change/comparison       -> ChangeDetectionService
+    Responsibilities:
+    - determine the high-level request intent
+    - normalize SEC form references such as 10K, 10-K and 10 K
+    - never resolve companies
+    - never retrieve evidence
+    - never call the generation model
     """
 
-    SUMMARY_PATTERNS = (
-        r"\bsummarize\s+all\b",
-        r"\bsummarise\s+all\b",
-        r"\bsummary\s+of\s+all\b",
-        r"\bcomplete\s+summary\b",
-        r"\boverall\s+summary\b",
-        r"\bsummarize\s+everything\b",
-        r"\bsummarise\s+everything\b",
-        r"\ball\s+(?:the\s+)?filings\b",
-        r"\ball\s+(?:the\s+)?files\b",
-    )
-
-    CHANGE_PATTERNS = (
+    _CHANGE_PATTERNS = (
         r"\bwhat\s+changed\b",
-        r"\bwhat'?s\s+changed\b",
-        r"\bwhat\s+is\s+new\b",
-        r"\bwhat'?s\s+new\b",
-        r"\bchanges?\s+between\b",
+        r"\bwhat(?:'s|\s+has)?\s+changed\b",
+        r"\bchanges?\b",
         r"\bcompare\b",
         r"\bcomparison\b",
-        r"\blatest\s+vs\.?\s+previous\b",
-        r"\blatest\s+versus\s+previous\b",
-        r"\bdifference(?:s)?\s+between\b",
+        r"\bdifference(?:s)?\b",
+        r"\bdiffer(?:ed|ence|ences)?\b",
+        r"\bversus\b",
+        r"\bvs\.?\b",
     )
 
-    FORM_PATTERNS = (
-        ("10-Q", r"\b10\s*-\s*q\b"),
-        ("10-K", r"\b10\s*-\s*k\b"),
-        ("8-K", r"\b8\s*-\s*k\b"),
+    _SUMMARY_PATTERNS = (
+        r"\bsummarize\b",
+        r"\bsummarise\b",
+        r"\bsummary\b",
+        r"\boverview\b",
+        r"\brecap\b",
     )
 
-    def route(
-        self,
-        question: str,
-    ) -> IntentResult:
+    _FORM_PATTERNS = (
+        ("10-K", r"(?<![A-Za-z0-9])10[\s-]*k(?![A-Za-z0-9])"),
+        ("10-Q", r"(?<![A-Za-z0-9])10[\s-]*q(?![A-Za-z0-9])"),
+        ("8-K", r"(?<![A-Za-z0-9])8[\s-]*k(?![A-Za-z0-9])"),
+    )
 
-        question = str(question or "").strip()
+    def route(self, question: str) -> IntentResult:
+        normalized = self._normalize_question(question)
+        detected_form = self._detect_form(normalized)
 
-        if not question:
-            raise ValueError(
-                "Question cannot be empty."
-            )
-
-        normalized = re.sub(
-            r"\s+",
-            " ",
-            question.lower(),
-        )
-
-        detected_form = self.detect_form(
-            normalized
-        )
-
-        if self._matches(
-            normalized,
-            self.CHANGE_PATTERNS,
-        ):
+        if self._matches_any(normalized, self._CHANGE_PATTERNS):
             return IntentResult(
                 intent=KnowledgeIntent.CHANGE_DETECTION,
                 reason="change/comparison language detected",
                 detected_form=detected_form,
             )
 
-        if self._matches(
-            normalized,
-            self.SUMMARY_PATTERNS,
-        ):
+        if self._matches_any(normalized, self._SUMMARY_PATTERNS):
             return IntentResult(
                 intent=KnowledgeIntent.COMPANY_SUMMARY,
-                reason="whole-company summary language detected",
+                reason="summary language detected",
                 detected_form=detected_form,
             )
 
@@ -105,25 +80,20 @@ class IntentRouter:
             detected_form=detected_form,
         )
 
-    def detect_form(
-        self,
-        text: str,
-    ) -> str | None:
+    @staticmethod
+    def _normalize_question(question: str) -> str:
+        return " ".join(str(question or "").strip().lower().split())
 
-        normalized = str(text or "").lower()
-
-        for form, pattern in self.FORM_PATTERNS:
-            if re.search(pattern, normalized):
-                return form
-
+    @classmethod
+    def _detect_form(cls, question: str) -> str | None:
+        for canonical_form, pattern in cls._FORM_PATTERNS:
+            if re.search(pattern, question, flags=re.IGNORECASE):
+                return canonical_form
         return None
 
     @staticmethod
-    def _matches(
-        text: str,
-        patterns,
-    ) -> bool:
+    def _matches_any(question: str, patterns: tuple[str, ...]) -> bool:
         return any(
-            re.search(pattern, text)
+            re.search(pattern, question, flags=re.IGNORECASE)
             for pattern in patterns
         )

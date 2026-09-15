@@ -37,6 +37,7 @@ class OllamaGenerationService:
         prompt: str,
         *,
         temperature=0.0,
+        max_tokens=512,
     ) -> str:
 
         prompt = str(prompt or "").strip()
@@ -53,8 +54,15 @@ class OllamaGenerationService:
                     "model": self.model_name,
                     "prompt": prompt,
                     "stream": False,
+
+                    # Qwen3 should answer directly rather than
+                    # spending time on an internal thinking pass.
+                    "think": False,
+
                     "options": {
                         "temperature": temperature,
+                        "num_predict": max_tokens,
+                        "num_ctx": 16384,
                     },
                 },
                 timeout=(5, 300),

@@ -1,15 +1,22 @@
+import hashlib
 from dataclasses import dataclass
+
+from django.db import transaction
 
 from watcher.knowledge_base.generation.ollama_generation_service import (
     OllamaGenerationService,
 )
-from watcher.knowledge_base.models import Filing
+from watcher.knowledge_base.models import (
+    Filing,
+    FilingSummaryCache,
+)
 from watcher.knowledge_base.summarization.document_summary_service import (
     DocumentSummary,
     DocumentSummaryService,
 )
 from watcher.knowledge_base.summarization.summary_citation import (
     SummaryCitation,
+    build_summary_citation,
 )
 
 
@@ -36,14 +43,24 @@ class FilingSummaryService:
     """
     Summarizes every chunked document belonging to one SEC filing.
 
-    Flow:
-        documents
-        -> document summaries
-        -> filing summary
+    Production flow:
 
-    Chunk-level SEC provenance is preserved.
+        filing
+          -> calculate content signature
+          -> valid cache exists?
+                YES -> return cached filing summary
+                NO  -> summarize documents
+                       -> build filing summary
+                       -> persist cache
+                       -> return result
+
+    Cache validity depends on:
+        - actual filing/document/chunk content
+        - generation model
+        - summary pipeline version
     """
 
+    SUMMARY_PIPELINE_VERSION = "sec-filing-summary-v3"
     def __init__(
         self,
         *,
@@ -94,6 +111,34 @@ class FilingSummaryService:
                 f"Filing {filing_id} has no chunked documents."
             )
 
+        content_signature = (
+            self._build_content_signature(
+                filing
+            )
+        )
+
+        model_name = self._model_name()
+
+        cached = (
+            FilingSummaryCache.objects
+            .filter(
+                filing=filing,
+                content_signature=content_signature,
+                model_name=model_name,
+                prompt_version=(
+                    self.SUMMARY_PIPELINE_VERSION
+                ),
+            )
+            .first()
+        )
+
+        if cached is not None:
+            return self._build_cached_result(
+                filing=filing,
+                documents=documents,
+                cached=cached,
+            )
+
         document_summaries = tuple(
             self.document_summary_service.summarize_document(
                 document.id
@@ -107,17 +152,86 @@ class FilingSummaryService:
             for citation in document_summary.citations
         )
 
-        final_summary = self._combine_document_summaries(
-            filing=filing,
-            summaries=document_summaries,
+        final_summary = (
+            self._combine_document_summaries(
+                filing=filing,
+                summaries=document_summaries,
+            )
         )
 
-        source_urls = tuple(
-            dict.fromkeys(
-                citation.source_url
-                for citation in citations
-                if citation.source_url
+        source_urls = self._source_urls(
+            citations
+        )
+
+        filing_date = (
+            filing.filing_date.isoformat()
+            if filing.filing_date
+            else None
+        )
+
+        result = FilingSummary(
+            filing_id=filing.id,
+            ticker=filing.company.ticker,
+            form=filing.form,
+            filing_date=filing_date,
+            accession_number=(
+                filing.accession_number
+            ),
+            document_count=len(
+                document_summaries
+            ),
+            chunk_count=sum(
+                summary.chunk_count
+                for summary
+                in document_summaries
+            ),
+            summary=final_summary,
+            documents=document_summaries,
+            citations=citations,
+            source_urls=source_urls,
+        )
+
+        self._store_cache(
+            filing=filing,
+            result=result,
+            content_signature=(
+                content_signature
+            ),
+            model_name=model_name,
+        )
+
+        return result
+
+    def _build_cached_result(
+        self,
+        *,
+        filing,
+        documents,
+        cached,
+    ) -> FilingSummary:
+        """
+        Restore the expensive filing-level summary from
+        PostgreSQL.
+
+        Citation metadata is rebuilt from current chunks.
+        This is cheap and ensures SEC provenance remains
+        tied to the current database records.
+
+        Document summaries themselves are not regenerated
+        on a cache hit because doing so would defeat the
+        purpose of the cache. Downstream company-summary
+        and change-detection services consume the filing
+        summary, counts and citations.
+        """
+
+        citations = (
+            self._build_current_citations(
+                filing
             )
+        )
+
+        source_urls = self._source_urls(
+            citations
         )
 
         filing_date = (
@@ -131,16 +245,206 @@ class FilingSummaryService:
             ticker=filing.company.ticker,
             form=filing.form,
             filing_date=filing_date,
-            accession_number=filing.accession_number,
-            document_count=len(document_summaries),
-            chunk_count=sum(
-                summary.chunk_count
-                for summary in document_summaries
+            accession_number=(
+                filing.accession_number
             ),
-            summary=final_summary,
-            documents=document_summaries,
+            document_count=len(documents),
+            chunk_count=len(citations),
+            summary=cached.summary,
+            documents=(),
             citations=citations,
             source_urls=source_urls,
+        )
+
+    def _build_content_signature(
+        self,
+        filing,
+    ) -> str:
+        """
+        Build a deterministic SHA-256 signature from the
+        actual filing metadata and all current document /
+        chunk content hashes.
+
+        Any filing-content change invalidates the cache.
+        """
+
+        digest = hashlib.sha256()
+
+        filing_parts = (
+            str(filing.id),
+            str(filing.accession_number or ""),
+            str(filing.form or ""),
+            str(filing.filing_date or ""),
+        )
+
+        digest.update(
+            "|".join(
+                filing_parts
+            ).encode("utf-8")
+        )
+
+        chunks = (
+            filing.chunks
+            .filter(
+                document__isnull=False
+            )
+            .select_related("document")
+            .order_by(
+                "document_id",
+                "chunk_index",
+                "id",
+            )
+        )
+
+        found_chunk = False
+
+        for chunk in chunks:
+            found_chunk = True
+
+            document = chunk.document
+
+            parts = (
+                str(document.id),
+                str(
+                    document.document_type
+                    or ""
+                ),
+                str(
+                    document.document_name
+                    or ""
+                ),
+                str(
+                    document.is_primary
+                ),
+                str(
+                    document.content_sha256
+                    or ""
+                ),
+                str(chunk.id),
+                str(chunk.chunk_index),
+                str(
+                    chunk.content_sha256
+                    or ""
+                ),
+            )
+
+            digest.update(
+                b"\n"
+            )
+
+            digest.update(
+                "|".join(
+                    parts
+                ).encode("utf-8")
+            )
+
+        if not found_chunk:
+            raise FilingSummaryError(
+                f"Filing {filing.id} has no chunked content."
+            )
+
+        return digest.hexdigest()
+
+    def _build_current_citations(
+        self,
+        filing,
+    ) -> tuple[SummaryCitation, ...]:
+
+        chunks = (
+            filing.chunks
+            .filter(
+                document__isnull=False
+            )
+            .select_related(
+                "filing",
+                "filing__company",
+                "document",
+            )
+            .order_by(
+                "document_id",
+                "chunk_index",
+                "id",
+            )
+        )
+
+        return tuple(
+            build_summary_citation(
+                chunk
+            )
+            for chunk in chunks
+        )
+
+    def _store_cache(
+        self,
+        *,
+        filing,
+        result,
+        content_signature,
+        model_name,
+    ):
+        """
+        Replace any stale cache for this filing with the
+        newly generated summary.
+
+        OneToOneField guarantees at most one cache row
+        per filing.
+        """
+
+        with transaction.atomic():
+            FilingSummaryCache.objects.update_or_create(
+                filing=filing,
+                defaults={
+                    "content_signature": (
+                        content_signature
+                    ),
+                    "model_name": (
+                        model_name
+                    ),
+                    "prompt_version": (
+                        self.SUMMARY_PIPELINE_VERSION
+                    ),
+                    "summary": (
+                        result.summary
+                    ),
+                    "document_count": (
+                        result.document_count
+                    ),
+                    "chunk_count": (
+                        result.chunk_count
+                    ),
+                },
+            )
+
+    def _model_name(
+        self,
+    ) -> str:
+
+        value = getattr(
+            self.generation_service,
+            "model_name",
+            None,
+        )
+
+        if value:
+            return str(value)
+
+        return (
+            self.generation_service
+            .__class__
+            .__name__
+        )
+
+    @staticmethod
+    def _source_urls(
+        citations,
+    ) -> tuple[str, ...]:
+
+        return tuple(
+            dict.fromkeys(
+                citation.source_url
+                for citation in citations
+                if citation.source_url
+            )
         )
 
     def _combine_document_summaries(
@@ -156,12 +460,14 @@ class FilingSummaryService:
         combined = "\n\n".join(
             (
                 f"[DOCUMENT {index + 1}]\n"
-                f"Type: {summary.document_type or 'Unknown'}\n"
+                f"Type: "
+                f"{summary.document_type or 'Unknown'}\n"
                 f"Name: {summary.document_name}\n"
                 f"Primary: {summary.is_primary}\n"
                 f"Summary:\n{summary.summary}"
             )
-            for index, summary in enumerate(summaries)
+            for index, summary
+            in enumerate(summaries)
         )
 
         prompt = f"""
