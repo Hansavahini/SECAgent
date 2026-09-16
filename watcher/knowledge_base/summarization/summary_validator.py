@@ -261,28 +261,66 @@ class SummaryValidator:
         claim: str,
         source_text: str,
     ) -> str | None:
-        claim_anchors = [
-            self._normalize_text(match.group(0))
-            for match in self.RELATIONSHIP_ANCHOR_RE.finditer(claim)
-        ]
+        """
+        Validate numeric/legal relationships sentence by sentence.
 
-        if len(claim_anchors) < 2:
-            return None
+        A multi-sentence summary claim may legitimately contain
+        different facts in different sentences. We therefore require
+        the anchors within EACH individual claim sentence to coexist
+        in one source sentence.
 
-        source_sentences = [
+        This remains fail-closed:
+        if a sentence combines multiple anchors that do not coexist
+        in any source sentence, the claim is rejected.
+        """
+
+        claim_sentences = [
             self._normalize_text(sentence)
-            for sentence in self.SOURCE_SENTENCE_RE.split(source_text)
+            for sentence in self.SOURCE_SENTENCE_RE.split(
+                claim
+            )
             if sentence.strip()
         ]
 
-        for sentence in source_sentences:
-            if all(
-                anchor in sentence
-                for anchor in claim_anchors
-            ):
-                return None
+        source_sentences = [
+            self._normalize_text(sentence)
+            for sentence in self.SOURCE_SENTENCE_RE.split(
+                source_text
+            )
+            if sentence.strip()
+        ]
 
-        return "relationship_not_supported_in_single_source_statement"
+        for claim_sentence in claim_sentences:
+            claim_anchors = [
+                self._normalize_text(
+                    match.group(0)
+                )
+                for match in self.RELATIONSHIP_ANCHOR_RE.finditer(
+                    claim_sentence
+                )
+            ]
+
+            # Zero or one anchor cannot create the type of
+            # cross-value relationship this check is designed
+            # to prevent.
+            if len(claim_anchors) < 2:
+                continue
+
+            relationship_supported = any(
+                all(
+                    anchor in source_sentence
+                    for anchor in claim_anchors
+                )
+                for source_sentence in source_sentences
+            )
+
+            if not relationship_supported:
+                return (
+                    "relationship_not_supported_"
+                    "in_single_source_statement"
+                )
+
+        return None
     def validate_section(
         self,
         *,
@@ -743,7 +781,6 @@ UNSUPPORTED
             f"[{labels}] "
             f"{validation.claim}"
         )
-
     @staticmethod
     def _normalize_text(
         value: str,
@@ -758,6 +795,22 @@ UNSUPPORTED
             " ",
         )
 
+        # Normalize equivalent percentage notation only for
+        # validation comparison.
+        #
+        # Example:
+        #   source: "16 percent"
+        #   claim:  "16%"
+        #
+        # Both normalize to:
+        #   "16 percent"
+        #
+        # This does NOT calculate or alter the numeric value.
+        value = value.replace(
+            "%",
+            " percent",
+        )
+
         value = re.sub(
             r"\s+",
             " ",
@@ -765,3 +818,4 @@ UNSUPPORTED
         )
 
         return value.strip()
+        

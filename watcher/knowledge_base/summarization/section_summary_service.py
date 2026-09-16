@@ -47,9 +47,8 @@ class SectionSummaryService:
     - Financial headline facts are handled separately through XBRL.
     - Narrative bullets must cite the source chunk(s) supporting them.
     """
-
     MAX_SECTION_CHARS = 32000
-    MAX_SUMMARY_TOKENS = 320
+    MAX_SUMMARY_TOKENS = 512
 
     SKIPPED_CATEGORIES = {
         "financial_statements",
@@ -321,6 +320,55 @@ class SectionSummaryService:
             ).strip(),
         )
 
+    @staticmethod
+    def _detail_limits(
+        text: str,
+    ) -> tuple[int, str]:
+        """
+        Choose a summary-size ceiling from the amount of source text.
+
+        This is intentionally company-independent and filing-independent.
+        It does not target a specific ticker, accession number, or file.
+        Short source sections stay short; larger source sections are
+        allowed to retain more independently supported material facts.
+        """
+
+        text_length = len(
+            str(text or "").strip()
+        )
+
+        if text_length <= 8000:
+            return 3, "1-3"
+
+        if text_length <= 18000:
+            return 4, "2-4"
+
+        if text_length <= 28000:
+            return 5, "3-5"
+
+        return 7, "4-6"
+
+    @staticmethod
+    def _normalized_item_number(
+        item_number: str,
+    ) -> str:
+        """
+        Normalize SEC item labels without ticker-specific assumptions.
+
+        Examples:
+            "Item 9.01" -> "9.01"
+            "9.01"      -> "9.01"
+        """
+
+        value = " ".join(
+            str(item_number or "").split()
+        ).strip().lower()
+
+        if value.startswith("item "):
+            value = value[5:].strip()
+
+        return value
+
     def _batch_prompt(
         self,
         *,
@@ -340,6 +388,12 @@ class SectionSummaryService:
         Every bullet must retain the exact supporting
         FilingChunk IDs.
         """
+
+        max_bullets, preferred_bullets = (
+            self._detail_limits(
+                batch
+            )
+        )
 
         return f"""
 You are extracting material facts from ONE section of an SEC filing.
@@ -417,23 +471,63 @@ STRICT RULES
 
 12. Do not summarize tables row-by-row.
 
-13. Keep only material information relevant to this SEC section.
+13. Keep all distinct material information relevant to this SEC section.
 
-14. Remove boilerplate and repetition.
+14. Remove boilerplate and genuine repetition only.
+    Do not remove a distinct material fact merely to shorten the summary.
 
-15. Maximum 5 concise bullets.
+15. Each bullet must represent ONE independently supportable
+    material fact, event, action, disclosure or commitment.
 
-16. Prefer 2-4 bullets where sufficient.
+16. Include enough explicit source context to make each retained fact
+    understandable, such as:
+    - what happened
+    - who or what it concerns
+    - the relevant date
+    - the stated amount or percentage
+    - the stated action
+    - the stated purpose
 
-17. Every bullet MUST include at least one valid [CHUNK n] label
+    Include such context ONLY when it is explicitly supported by
+    the cited source chunk(s).
+
+17. Prefer one complete, clear sentence per bullet.
+
+18. Maximum {max_bullets} bullets for this source batch.
+
+19. Prefer {preferred_bullets} bullets only when that many distinct
+    material facts are actually present. Never add or retain a weak,
+    repetitive or administrative fact merely to reach a target count.
+
+20. Prioritize information that explains the material event, transaction,
+    agreement, operational development, financial fact, risk, commitment
+    or management action disclosed by the SEC source.
+
+21. Normally OMIT purely administrative filing mechanics such as:
+    - cover-page references
+    - table-of-contents references
+    - exhibit-index listings
+    - signature-page references
+    - generic incorporation-by-reference language
+    - generic "qualified in its entirety" language
+    - routine legal-opinion or consent references
+
+    Retain one of these only when it contains a distinct material fact
+    necessary to understand the filing.
+
+22. Every bullet MUST include at least one valid [CHUNK n] label
     appearing in the supplied source text.
 
-18. Never invent a chunk number.
+23. Never invent a chunk number.
 
-19. If one sentence requires different source chunks to support
-    different pieces of the claim, include all required chunk labels.
+24. If one sentence requires different source chunks to support
+    different pieces of the claim, include ALL required chunk labels.
 
-20. If there is no material information worth retaining, return
+25. Do not add interpretation, significance, causation, investor impact,
+    business impact or implications unless the cited SEC source
+    explicitly states them.
+
+26. If there is no material information worth retaining, return
     exactly:
 
 NO_MATERIAL_SUMMARY
@@ -478,6 +572,12 @@ Return only source-grounded concise bullets.
 
         if len(usable) == 1:
             return usable[0]
+
+        max_bullets, preferred_bullets = (
+            self._detail_limits(
+                group.text
+            )
+        )
 
         combined = "\n\n".join(
             (
@@ -554,31 +654,54 @@ STRICT RULES
 
 12. Preserve amounts, percentages, dates and quantities exactly.
 
-13. Preserve quarterly, YTD and annual period meaning exactly.
+13. Preserve quarterly, YTD, nine-month and annual reporting-period
+    meaning exactly.
 
 14. Never describe:
     - nine-month/YTD data as quarterly
     - quarterly data as annual
     - annual data as quarterly
 
-15. Remove duplicate claims.
+15. Remove duplicate claims, boilerplate and genuine repetition only.
 
-16. Keep only material information.
+16. Keep every distinct material claim that remains independently
+    supported by its cited chunk(s).
 
-17. Do not rewrite the entire section.
+17. Prioritize the facts needed to understand the material disclosure.
+    Do not retain administrative filing mechanics merely because they
+    appeared in a candidate bullet.
 
-18. Prefer concise bullets over detailed restatement.
+18. Normally omit:
+    - cover-page references
+    - table-of-contents references
+    - exhibit-index listings
+    - signature-page references
+    - generic incorporation-by-reference language
+    - generic "qualified in its entirety" language
+    - routine legal-opinion or consent references
 
-19. Maximum 4 concise bullets.
+    Retain one only when it carries a distinct material fact necessary
+    to understand the disclosure.
 
-20. Prefer 1-3 bullets when sufficient.
+19. Keep each final bullet focused on ONE independently supportable
+    material idea.
 
-21. Every final bullet must begin with its supporting
+20. Maximum {max_bullets} final bullets for this section.
+
+21. Prefer {preferred_bullets} final bullets only when that many
+    independently supported material facts exist. Never keep a low-value
+    fact merely to reach a target count.
+
+22. Every final bullet must begin with its supporting
     [CHUNK n] label or labels.
 
-22. If a claim is not clearly supported, OMIT IT.
+23. Never add interpretation, causation, significance, investor impact,
+    business impact or implications unless explicitly present in the
+    candidate bullets and supported by their cited chunks.
 
-23. If nothing material remains, return exactly:
+24. If a claim is not clearly supported, OMIT IT.
+
+25. If nothing material remains, return exactly:
 
 NO_MATERIAL_SUMMARY
 
@@ -737,7 +860,20 @@ Return only the consolidated source-grounded bullets.
         ):
             return "administrative"
 
-        # 8-Ks are event-driven.
+        # 8-K Item 9.01 is normally the filing's exhibit / financial
+        # statement index. The actual exhibit documents are handled
+        # separately by the document summarization pipeline, so treating
+        # this index as a material event would duplicate low-value filing
+        # mechanics in the final summary.
+        if (
+            normalized_form == "8-K"
+            and self._normalized_item_number(
+                item_number
+            ).startswith("9.01")
+        ):
+            return "administrative"
+
+        # Other labeled 8-K items are event-driven.
         if (
             normalized_form == "8-K"
             and item_number

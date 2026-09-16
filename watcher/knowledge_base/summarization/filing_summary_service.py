@@ -60,7 +60,7 @@ class FilingSummaryService:
         - summary pipeline version
     """
 
-    SUMMARY_PIPELINE_VERSION = "sec-filing-summary-v3"
+    SUMMARY_PIPELINE_VERSION = "sec-filing-summary-v4"
     def __init__(
         self,
         *,
@@ -469,23 +469,60 @@ class FilingSummaryService:
             for index, summary
             in enumerate(summaries)
         )
-
         prompt = f"""
-Combine the SEC document summaries below into one filing-level summary.
+Combine the SEC document summaries below into one complete,
+clear filing-level summary.
 
 Use ONLY the supplied document summaries.
 
-Rules:
+STRICT RULES:
+
 - Do not add outside knowledge.
-- Do not invent facts.
-- Preserve important numbers, dates, percentages and amounts.
-- Preserve material risks, events and commitments.
+
+- Do not invent, estimate, assume or infer facts.
+
+- Preserve every distinct material fact that is useful to
+  understanding the filing.
+
+- Explain each retained fact clearly, but do not add interpretation,
+  significance, causation, investor impact, business impact or
+  implications unless explicitly stated in the supplied document
+  summaries.
+
+- Preserve important numbers, dates, percentages and amounts exactly.
+
+- Preserve material risks, events, commitments, agreements,
+  transactions, management actions and disclosures.
+
+- Do not omit material dates, amounts, percentages, commitments,
+  risks, agreements, transactions or management actions merely to
+  make the result shorter.
+
 - Preserve valid SEC source labels such as [C625].
+
 - Never invent a source label.
+
+- Keep every source label attached to the fact it supports.
+
 - Distinguish the primary filing from exhibits when relevant.
-- Remove unnecessary repetition.
-- Do not merge facts from different periods incorrectly.
-- Keep the result factual and organized.
+
+- Remove genuine duplication, but do not remove separate material
+  facts simply because they discuss the same general subject.
+
+- Never combine facts from different reporting periods unless the
+  supplied summaries explicitly connect them.
+
+- Never combine separate transactions, agreements, programs,
+  authorizations, legal matters, regulatory matters or events into
+  one claim unless the supplied summaries explicitly connect them.
+
+- Prefer a complete, readable filing summary over aggressive
+  compression.
+
+- If the available source material is short, keep the summary short.
+  Do not add filler merely to make the summary longer.
+
+- Keep the result factual, readable and organized.
 
 Company: {filing.company.ticker}
 Form: {filing.form}
@@ -496,10 +533,11 @@ DOCUMENT SUMMARIES
 ------------------
 {combined}
 
-Return one consolidated filing summary with SEC source labels.
+Return one consolidated filing summary with the existing valid
+SEC source labels preserved.
 """.strip()
-
         return self.generation_service.generate(
             prompt,
             temperature=0.0,
+            max_tokens=768,
         )

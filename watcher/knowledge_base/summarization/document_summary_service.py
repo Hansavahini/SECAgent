@@ -3,7 +3,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from django.db import transaction
-
+from watcher.knowledge_base.summarization.document_fallback_summary_service import (
+    DocumentFallbackSummaryService,
+)
 from watcher.knowledge_base.generation.ollama_generation_service import (
     OllamaGenerationService,
 )
@@ -83,7 +85,7 @@ class DocumentSummaryService:
             -> store/update DocumentSummaryCache
     """
 
-    SUMMARY_PIPELINE_VERSION = "sec-document-summary-v5"
+    SUMMARY_PIPELINE_VERSION = "sec-document-summary-v11"
 
     FINANCIAL_FORMS = {
         "10-Q",
@@ -112,7 +114,11 @@ class DocumentSummaryService:
         self.section_service = (
             SectionSummaryService()
         )
-
+        self.fallback_service = (
+            DocumentFallbackSummaryService(
+                generation_service=self.generation_service,
+            )
+        )
         self.validator = (
             SummaryValidator()
         )
@@ -346,7 +352,30 @@ class DocumentSummaryService:
         document,
         chunks,
     ):
+        """
+        Build normal section-aware summaries first.
+
+        A validator result containing only NO_MATERIAL_SUMMARY does
+        NOT count as usable material.
+
+        When normal section summarization finds no usable material,
+        use the generic document fallback for:
+            - non-primary documents/exhibits
+            - primary 8-K documents
+
+        Primary 10-Q and 10-K documents continue to rely on their
+        existing XBRL + section-aware path.
+        """
+
         filing = document.filing
+
+        no_material = (
+            self.validator.NO_MATERIAL_SUMMARY
+        )
+
+        # ---------------------------------------------------------
+        # 1. NORMAL SECTION-AWARE PATH
+        # ---------------------------------------------------------
 
         groups = (
             self.section_service
@@ -356,34 +385,110 @@ class DocumentSummaryService:
             )
         )
 
-        if not groups:
-            return []
+        if groups:
+            section_summaries = (
+                self.section_service
+                .summarize_groups(
+                    groups,
+                    ticker=filing.company.ticker,
+                    form=filing.form,
+                    filing_date=filing.filing_date,
+                    accession_number=(
+                        filing.accession_number
+                    ),
+                    document_name=(
+                        document.document_name
+                    ),
+                )
+            )
 
-        section_summaries = (
-            self.section_service
-            .summarize_groups(
-                groups,
-                ticker=filing.company.ticker,
-                form=filing.form,
-                filing_date=filing.filing_date,
-                accession_number=(
-                    filing.accession_number
-                ),
-                document_name=(
-                    document.document_name
-                ),
+            validated_sections = (
+                self.validator
+                .validate_sections(
+                    section_summaries=(
+                        section_summaries
+                    ),
+                    chunks=chunks,
+                )
+            )
+
+            material_sections = tuple(
+                section
+                for section in validated_sections
+                if (
+                    str(
+                        section.summary
+                        or ""
+                    ).strip()
+                    and str(
+                        section.summary
+                        or ""
+                    ).strip()
+                    != no_material
+                )
+            )
+
+            if material_sections:
+                return material_sections
+
+        # ---------------------------------------------------------
+        # 2. DETERMINE WHETHER FALLBACK IS APPROPRIATE
+        # ---------------------------------------------------------
+
+        form = str(
+            filing.form or ""
+        ).strip().upper()
+
+        should_use_fallback = (
+            not document.is_primary
+            or form == "8-K"
+        )
+
+        if not should_use_fallback:
+            return ()
+
+        # ---------------------------------------------------------
+        # 3. GENERIC DOCUMENT-LEVEL FALLBACK
+        # ---------------------------------------------------------
+
+        fallback_summaries = (
+            self.fallback_service
+            .summarize_document(
+                document=document,
+                chunks=chunks,
             )
         )
 
-        return (
+        if not fallback_summaries:
+            return ()
+
+        validated_fallback = (
             self.validator
             .validate_sections(
                 section_summaries=(
-                    section_summaries
+                    fallback_summaries
                 ),
                 chunks=chunks,
             )
         )
+
+        material_fallback = tuple(
+            section
+            for section in validated_fallback
+            if (
+                str(
+                    section.summary
+                    or ""
+                ).strip()
+                and str(
+                    section.summary
+                    or ""
+                ).strip()
+                != no_material
+            )
+        )
+
+        return material_fallback
 
     def _build_result(
         self,

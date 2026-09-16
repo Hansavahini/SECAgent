@@ -142,7 +142,7 @@ TEMPLATES = [
 WSGI_APPLICATION = 'config.wsgi.application'
 
 
-# Database
+# Database3
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 
 DATABASES = {
@@ -250,4 +250,67 @@ SEC_DOWNLOAD_DIR = Path(
 SEC_TICKER_FILE = Path(
     _env_str("SEC_TICKER_FILE")
     or str(BASE_DIR / "tickers.txt")
+)
+import os
+
+
+SEC_EMAIL_NOTIFICATIONS_ENABLED = (
+    os.getenv(
+        "SEC_EMAIL_NOTIFICATIONS_ENABLED",
+        "False",
+    ).strip().lower()
+    == "true"
+)
+
+
+EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
+
+EMAIL_HOST = os.getenv("SMTP_HOST", "")
+
+EMAIL_PORT = int(
+    os.getenv("SMTP_PORT", "587")
+)
+
+EMAIL_HOST_USER = os.getenv(
+    "SMTP_USERNAME",
+    "",
+)
+
+EMAIL_HOST_PASSWORD = os.getenv(
+    "SMTP_PASSWORD",
+    "",
+)
+
+SMTP_SECURITY = os.getenv(
+    "SMTP_SECURITY",
+    "STARTTLS",
+).strip().upper()
+
+
+EMAIL_USE_TLS = SMTP_SECURITY in {
+    "TLS",
+    "STARTTLS",
+}
+
+EMAIL_USE_SSL = SMTP_SECURITY == "SSL"
+
+
+DEFAULT_FROM_EMAIL = os.getenv(
+    "SMTP_SENDER_EMAIL",
+    "",
+)
+
+SEC_EMAIL_SENDER_NAME = os.getenv(
+    "SMTP_SENDER_NAME",
+    "SEC Filing Watcher",
+)
+
+SEC_REPLY_TO_EMAIL = os.getenv(
+    "SMTP_REPLY_TO_EMAIL",
+    "",
+)
+
+SEC_ALERT_RECIPIENT_EMAIL = os.getenv(
+    "SEC_ALERT_RECIPIENT_EMAIL",
+    "",
 )
