@@ -1,11 +1,26 @@
 from pathlib import Path
 
-from watcher.services.download_registry import DownloadRegistry
-from watcher.services.filing_discovery import FilingDiscovery
-from watcher.services.filing_downloader import FilingDownloader
-from watcher.services.notification_service import FilingNotificationService
-from watcher.services.ticker_resolver import TickerResolver
-
+from watcher.services.download_registry import (
+    DownloadRegistry,
+)
+from watcher.services.filing_discovery import (
+    FilingDiscovery,
+)
+from watcher.services.filing_downloader import (
+    FilingDownloader,
+)
+from watcher.services.filing_metadata_service import (
+    FilingMetadataService,
+)
+from watcher.services.notification_service import (
+    FilingNotificationService,
+)
+from watcher.services.ticker_resolver import (
+    TickerResolver,
+)
+from watcher.services.filing_email_service import (
+    FilingEmailService,
+)
 from watcher.knowledge_base.ingestion.filing_indexing_service import (
     FilingIndexingService,
 )
@@ -19,31 +34,20 @@ from watcher.knowledge_base.summarization.filing_summary_service import (
 
 class TickerProcessor:
     """
-    Process one ticker completely before moving to the next ticker.
+    Process one ticker completely before moving to the next.
 
-    Processing order:
-        8-K
-        10-K
-        10-Q
+    Existing flow remains:
 
-    Duplicate identity remains:
-        CIK + accession number + sequence
-
-    Existing behavior remains authoritative:
         discover
         -> duplicate check
         -> download
+        -> registry
         -> register
         -> optional indexing
+        -> summary
+        -> email
 
-    New behavior:
-        when automatic indexing is enabled and indexing succeeds,
-        generate/reuse the existing FilingSummaryService summary,
-        let that service persist its existing PostgreSQL cache,
-        then email that same summary.
-
-    Email failures are isolated and never undo successful SEC, database,
-    indexing, or summary work.
+    EDGAR metadata handling is additive.
     """
 
     FORMS = (
@@ -63,6 +67,8 @@ class TickerProcessor:
         summary_service=None,
         notification_service=None,
         auto_index=False,
+        filing_metadata_service=None,
+        filing_email_service=None,
     ):
         self.resolver = (
             resolver
@@ -93,6 +99,10 @@ class TickerProcessor:
             auto_index
         )
 
+        # ---------------------------------------------------------
+        # Existing indexing behavior.
+        # ---------------------------------------------------------
+
         self.indexing_service = (
             indexing_service
         )
@@ -104,6 +114,10 @@ class TickerProcessor:
             self.indexing_service = (
                 FilingIndexingService()
             )
+
+        # ---------------------------------------------------------
+        # Existing summary behavior.
+        # ---------------------------------------------------------
 
         self.summary_service = (
             summary_service
@@ -117,11 +131,39 @@ class TickerProcessor:
                 FilingSummaryService()
             )
 
+        # ---------------------------------------------------------
+        # Existing notification service.
+        # ---------------------------------------------------------
+
         self.notification_service = (
             notification_service
             or FilingNotificationService()
         )
 
+        # ---------------------------------------------------------
+        # Optional EDGAR metadata coordinator.
+        # ---------------------------------------------------------
+
+        self.filing_metadata_service = (
+            filing_metadata_service
+            or FilingMetadataService()
+        )
+
+        # ---------------------------------------------------------
+        # Email coordinator.
+        #
+        # Reuses the SAME notification service so all existing
+        # SMTP settings / recipient configuration stay unchanged.
+        # ---------------------------------------------------------
+
+        self.filing_email_service = (
+            filing_email_service
+            or FilingEmailService(
+                notification_service=(
+                    self.notification_service
+                )
+            )
+        )
     @staticmethod
     def _print_new_filing(
         *,
@@ -149,6 +191,92 @@ class TickerProcessor:
         print("DOWNLOAD     : SUCCESS")
         print("=" * 70)
 
+    @staticmethod
+    def _print_metadata(metadata):
+        if metadata.accepted_at is not None:
+            print(
+                "EDGAR ACCEPT : "
+                f"{metadata.accepted_at_display}"
+            )
+        else:
+            print(
+                "EDGAR ACCEPT : NOT AVAILABLE"
+            )
+
+        if metadata.entry_session is not None:
+            print(
+                "ENTRY SESSION: "
+                f"{metadata.entry_session}"
+            )
+        else:
+            print(
+                "ENTRY SESSION: NOT AVAILABLE"
+            )
+
+        if metadata.sec_item_codes:
+            print(
+                "SEC ITEMS    : "
+                + ", ".join(
+                    metadata.sec_item_codes
+                )
+            )
+
+    @staticmethod
+    def _print_item_verification(
+        verification,
+        error,
+    ):
+        if error:
+            print(
+                "ITEM VERIFY  : UNAVAILABLE "
+                f"({error})"
+            )
+            return
+
+        if verification is None:
+            return
+
+        print(
+            "ITEM VERIFY  : "
+            f"{verification.status}"
+        )
+
+        print(
+            "SEC ITEMS    : "
+            + (
+                ", ".join(
+                    verification.sec_items
+                )
+                or "NOT AVAILABLE"
+            )
+        )
+
+        print(
+            "PARSED ITEMS : "
+            + (
+                ", ".join(
+                    verification.parsed_items
+                )
+                or "NOT AVAILABLE"
+            )
+        )
+
+        if verification.missing_from_parser:
+            print(
+                "ITEM MISSING : "
+                + ", ".join(
+                    verification.missing_from_parser
+                )
+            )
+
+        if verification.extra_in_parser:
+            print(
+                "ITEM EXTRA   : "
+                + ", ".join(
+                    verification.extra_in_parser
+                )
+            )
+
     def _send_summary_email(
         self,
         *,
@@ -156,45 +284,27 @@ class TickerProcessor:
         filename,
         saved_path,
         source_url,
+        metadata=None,
+        item_verification=None,
     ):
-        """
-        Email the exact summary already returned by FilingSummaryService.
-
-        FilingSummaryService has already persisted/reused the PostgreSQL
-        FilingSummaryCache before this method is called.
-        """
-        summary_text = str(
-            summary_result.summary
-            or ""
-        ).strip()
-
-        if not summary_text:
-            print(
-                "EMAIL        : NOT SENT "
-                "(generated summary is empty)"
-            )
-            return False
-
         try:
             email_sent = (
-                self.notification_service
-                .send_new_filing_notification(
-                    ticker=summary_result.ticker,
-                    form_type=summary_result.form,
-                    filename=filename,
-                    filing_date=summary_result.filing_date,
-                    accession_number=(
-                        summary_result.accession_number
+                self.filing_email_service
+                .send(
+                    summary_result=(
+                        summary_result
                     ),
-                    local_path=saved_path,
-                    sec_url=source_url,
-                    summary_text=summary_text,
+                    filename=filename,
+                    saved_path=saved_path,
+                    source_url=source_url,
+                    metadata=metadata,
+                    item_verification=(
+                        item_verification
+                    ),
                 )
             )
+
         except Exception as exc:
-            # Defensive isolation. notification_service itself should
-            # already catch SMTP failures, but email must never break
-            # the existing processing flow.
             print(
                 "EMAIL        : FAILED "
                 f"({exc})"
@@ -223,18 +333,9 @@ class TickerProcessor:
             "EMAIL        : NOT SENT "
             "(check SMTP configuration/logs)"
         )
+
         return False
-
     def process(self, ticker):
-        """
-        Process all supported forms for one ticker.
-
-        Returns the existing summary dictionary.
-
-        Invalid ticker resolution is allowed to raise so the outer
-        watcher command can log it and continue with the next ticker.
-        """
-
         company = self.resolver.resolve(
             ticker
         )
@@ -278,8 +379,6 @@ class TickerProcessor:
                 "forms"
             ][form] = form_summary
 
-            # Preserve existing behavior: create the required folder
-            # even when no filings exist.
             directory = (
                 self.downloader
                 .get_download_dir(
@@ -341,8 +440,6 @@ class TickerProcessor:
                 ]
 
                 try:
-                    # Resolve exact SEC document first so its sequence
-                    # is known before duplicate checking.
                     base_url, document = (
                         self.downloader
                         .resolve_document(
@@ -370,7 +467,6 @@ class TickerProcessor:
                             "could not be resolved"
                         )
 
-                    # Preserve existing duplicate protection.
                     if self.registry.is_downloaded(
                         cik,
                         accession_number,
@@ -411,7 +507,6 @@ class TickerProcessor:
                         )
                     )
 
-                    # Only genuinely new filings reach this download.
                     result = (
                         self.downloader
                         .download(
@@ -441,8 +536,6 @@ class TickerProcessor:
                         or sequence
                     ).strip()
 
-                    # Preserve existing semantics: mark downloaded only
-                    # after the final file has successfully been written.
                     self.registry.mark_downloaded(
                         cik,
                         accession_number,
@@ -483,11 +576,68 @@ class TickerProcessor:
                         or ""
                     ).strip()
 
-                    # Show the exact new file immediately.
-                    # Email is NOT sent here.
+                    # ---------------------------------------------
+                    # Optional EDGAR metadata.
+                    # ---------------------------------------------
+
+                    metadata = (
+                        self.filing_metadata_service
+                        .prepare(
+                            filing=filing,
+                            expected_cik=cik,
+                            expected_company_name=(
+                                company.get(
+                                    "name",
+                                    "",
+                                )
+                            ),
+                            expected_ticker=(
+                                resolved_ticker
+                            ),
+                        )
+                    )
+
+                    if metadata.timestamp_error:
+                        print(
+                            "EDGAR TIME   : UNAVAILABLE "
+                            f"({metadata.timestamp_error})"
+                        )
+
+                    if metadata.session_error:
+                        print(
+                            "ENTRY SESSION: UNAVAILABLE "
+                            f"({metadata.session_error})"
+                        )
+                    if metadata.company_verification_error:
+                        print(
+                            "COMPANY VERIFY: UNAVAILABLE "
+                            f"({metadata.company_verification_error})"
+                        )
+
+                    elif metadata.company_verification is not None:
+                        verification = (
+                            metadata.company_verification
+                        )
+
+                        print(
+                            "COMPANY VERIFY: "
+                            f"{verification.status}"
+                        )
+
+                        print(
+                            "SEC COMPANY   : "
+                            f"{verification.sec_company_name or 'NOT AVAILABLE'}"
+                        )
+
+                        print(
+                            "SEC CIK       : "
+                            f"{verification.sec_cik or 'NOT AVAILABLE'}"
+                        )
                     self._print_new_filing(
                         ticker=resolved_ticker,
-                        form_type=resolved_form_type,
+                        form_type=(
+                            resolved_form_type
+                        ),
                         filing_date=filing_date,
                         accession_number=(
                             accession_number
@@ -500,7 +650,10 @@ class TickerProcessor:
                         source_url=source_url,
                     )
 
-                    # Preserve existing KB/PostgreSQL registration flow.
+                    # ---------------------------------------------
+                    # PostgreSQL registration.
+                    # ---------------------------------------------
+
                     try:
                         registered_filing = (
                             self.registration_service
@@ -538,11 +691,18 @@ class TickerProcessor:
                                         "url"
                                     ]
                                 ),
+                                accepted_at=(
+                                    metadata.accepted_at
+                                ),
                             )
                         )
 
                         print(
                             "REGISTRATION : SUCCESS"
+                        )
+
+                        self._print_metadata(
+                            metadata
                         )
 
                     except Exception as exc:
@@ -560,12 +720,12 @@ class TickerProcessor:
                             f"({exc})"
                         )
 
-                        # Preserve existing behavior: a successful SEC
-                        # download remains successful even if KB
-                        # registration fails.
                         continue
 
-                    # Preserve existing optional automatic indexing.
+                    # ---------------------------------------------
+                    # Existing automatic indexing.
+                    # ---------------------------------------------
+
                     if (
                         self.auto_index
                         and self.indexing_service
@@ -614,21 +774,49 @@ class TickerProcessor:
                                 f"({exc})"
                             )
 
-                            # Preserve isolation: download and
-                            # registration remain successful.
                             continue
 
-                        # Summary generation is new orchestration, but it
-                        # uses your EXISTING FilingSummaryService exactly.
+                        # -----------------------------------------
+                        # Structured 8-K item verification.
+                        # -----------------------------------------
+
+                        (
+                            item_verification,
+                            verification_error,
+                        ) = (
+                            self.filing_metadata_service
+                            .verify_items(
+                                filing=(
+                                    registered_filing
+                                ),
+                                form=form,
+                                sec_item_codes=(
+                                    metadata.sec_item_codes
+                                ),
+                            )
+                        )
+
+                        self._print_item_verification(
+                            item_verification,
+                            verification_error,
+                        )
+
+                        # -----------------------------------------
+                        # Existing summary behavior.
+                        # -----------------------------------------
+
                         if self.summary_service is None:
                             print(
                                 "SUMMARY      : NOT AVAILABLE"
                             )
+
                             print(
                                 "EMAIL        : NOT SENT"
                             )
+
                             print("=" * 70)
                             print()
+
                             continue
 
                         try:
@@ -639,13 +827,14 @@ class TickerProcessor:
                                 )
                             )
 
-                            # summarize_filing() returns only after its
-                            # existing PostgreSQL cache save/reuse path.
                             print(
-                                "SUMMARY      : GENERATED SUCCESSFULLY"
+                                "SUMMARY      : "
+                                "GENERATED SUCCESSFULLY"
                             )
+
                             print(
-                                "POSTGRESQL   : SUMMARY STORED/REUSED"
+                                "POSTGRESQL   : "
+                                "SUMMARY STORED/REUSED"
                             )
 
                         except Exception as exc:
@@ -657,21 +846,24 @@ class TickerProcessor:
                                 f"{exc}"
                             )
 
-                            # Do not change existing index counters and
-                            # do not undo successful work.
                             print(
                                 "SUMMARY      : FAILED "
                                 f"({exc})"
                             )
+
                             print(
                                 "EMAIL        : NOT SENT"
                             )
+
                             print("=" * 70)
                             print()
+
                             continue
 
-                        # New side effect only: email the exact same
-                        # summary returned by the existing service.
+                        # -----------------------------------------
+                        # Existing email behavior.
+                        # -----------------------------------------
+
                         self._send_summary_email(
                             summary_result=(
                                 summary_result
@@ -685,6 +877,10 @@ class TickerProcessor:
                             source_url=(
                                 source_url
                             ),
+                            metadata=metadata,
+                            item_verification=(
+                                item_verification
+                            ),
                         )
 
                         print("=" * 70)
@@ -694,28 +890,31 @@ class TickerProcessor:
                         print(
                             "INDEXING     : NOT AVAILABLE"
                         )
+
                         print(
                             "SUMMARY      : NOT GENERATED"
                         )
+
                         print(
                             "EMAIL        : NOT SENT"
                         )
+
                         print("=" * 70)
                         print()
 
                     else:
-                        # Preserve the meaning of the existing
-                        # auto_index flag. We do not silently change
-                        # your old behavior.
                         print(
                             "INDEXING     : DISABLED"
                         )
+
                         print(
                             "SUMMARY      : NOT GENERATED"
                         )
+
                         print(
                             "EMAIL        : NOT SENT"
                         )
+
                         print("=" * 70)
                         print()
 
@@ -735,7 +934,7 @@ class TickerProcessor:
                         f"{exc}"
                     )
 
-                    # One bad filing must not stop remaining filings.
+                    # One filing failure must not stop the ticker.
                     continue
 
         return summary

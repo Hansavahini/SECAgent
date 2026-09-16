@@ -2,7 +2,9 @@ import logging
 import re
 
 from django.conf import settings
-from django.core.mail import EmailMultiAlternatives
+from django.core.mail import (
+    EmailMultiAlternatives,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -10,22 +12,10 @@ logger = logging.getLogger(__name__)
 
 class FilingNotificationService:
     """
-    Send an email notification after a NEW SEC filing has been:
+    Sends an already-generated SEC filing summary.
 
-        1. downloaded
-        2. registered
-        3. indexed
-        4. summarized
-        5. stored/reused in PostgreSQL
-
-    IMPORTANT:
-    This service does NOT generate summaries.
-
-    It receives the summary already produced by FilingSummaryService
-    and only prepares it for a clean, readable email.
-
-    Internal chunk/citation markers are removed from the EMAIL ONLY.
-    The original summary stored in PostgreSQL remains unchanged.
+    Summary generation and PostgreSQL storage happen elsewhere.
+    Email failures never interrupt the watcher flow.
     """
 
     def __init__(self):
@@ -46,17 +36,9 @@ class FilingNotificationService:
         summary_text,
     ):
         """
-        Convert the internally generated SEC summary into a cleaner
-        user-facing email version.
+        Clean only the email copy of the generated summary.
 
-        Examples removed from email:
-            [C1]
-            [C25]
-            [C625]
-            [CHUNK 1]
-            [Chunk 12]
-
-        PostgreSQL content is NOT modified.
+        PostgreSQL summary content remains unchanged.
         """
 
         text = str(
@@ -67,10 +49,8 @@ class FilingNotificationService:
         if not text:
             return ""
 
-        # ---------------------------------------------------------
-        # Remove internal citation labels such as:
+        # Remove internal citations:
         # [C1], [C25], [C625]
-        # ---------------------------------------------------------
         text = re.sub(
             r"\s*\[C\d+\]",
             "",
@@ -78,11 +58,8 @@ class FilingNotificationService:
             flags=re.IGNORECASE,
         )
 
-        # ---------------------------------------------------------
-        # Remove explicit chunk labels such as:
-        # [CHUNK 1]
-        # [Chunk 12]
-        # ---------------------------------------------------------
+        # Remove chunk labels:
+        # [CHUNK 1], [Chunk 20]
         text = re.sub(
             r"\s*\[\s*CHUNK\s+\d+\s*\]",
             "",
@@ -90,43 +67,28 @@ class FilingNotificationService:
             flags=re.IGNORECASE,
         )
 
-        # ---------------------------------------------------------
-        # Remove standalone prefixes such as:
-        #
+        # Remove line prefixes:
         # Chunk 1:
-        # CHUNK 25:
-        #
-        # Only when they occur at the beginning of a line.
-        # ---------------------------------------------------------
         text = re.sub(
             r"(?im)^\s*chunk\s+\d+\s*:\s*",
             "",
             text,
         )
 
-        # ---------------------------------------------------------
-        # Fix spaces left before punctuation after removing labels.
-        #
-        # Example:
-        # "Revenue increased [C12]."
-        # becomes:
-        # "Revenue increased."
-        # ---------------------------------------------------------
+        # Fix spaces before punctuation.
         text = re.sub(
             r"\s+([,.;:!?])",
             r"\1",
             text,
         )
 
-        # Remove trailing spaces from lines.
+        # Remove trailing spaces.
         text = "\n".join(
             line.rstrip()
             for line in text.splitlines()
         )
 
-        # ---------------------------------------------------------
         # Avoid excessive blank lines.
-        # ---------------------------------------------------------
         text = re.sub(
             r"\n{3,}",
             "\n\n",
@@ -134,6 +96,172 @@ class FilingNotificationService:
         )
 
         return text.strip()
+
+    @staticmethod
+    def _format_item_codes(
+        item_codes,
+    ):
+        values = []
+        seen = set()
+
+        for item in item_codes or ():
+            value = str(
+                item
+            ).strip()
+
+            if not value:
+                continue
+
+            if value in seen:
+                continue
+
+            seen.add(value)
+            values.append(value)
+
+        if not values:
+            return "N/A"
+
+        return ", ".join(values)
+
+    @classmethod
+    def _build_body(
+        cls,
+        *,
+        ticker,
+        form_type,
+        filename,
+        filing_date,
+        accession_number,
+        local_path,
+        sec_url,
+        clean_summary,
+        accepted_at_display,
+        entry_session,
+        item_codes,
+        item_verification_status,
+        company_verification_status,
+        manual_audit_status,
+    ):
+        """
+        Build the plain-text SEC filing notification email.
+        """
+
+        details = [
+            (
+                "A new SEC filing has been detected "
+                "and processed successfully."
+            ),
+            "",
+            "COMPANY / FILING DETAILS",
+            "-" * 60,
+            f"Ticker: {ticker}",
+            f"Form Type: {form_type}",
+            (
+                "Filing Date: "
+                f"{filing_date or 'N/A'}"
+            ),
+        ]
+
+        # ---------------------------------------------------------
+        # EDGAR acceptance timestamp.
+        # ---------------------------------------------------------
+
+        if accepted_at_display:
+            details.append(
+                "EDGAR Accepted: "
+                f"{accepted_at_display}"
+            )
+
+        # ---------------------------------------------------------
+        # Calculated market entry session.
+        # ---------------------------------------------------------
+
+        if entry_session:
+            details.append(
+                "Entry Session: "
+                f"{entry_session}"
+            )
+
+        # ---------------------------------------------------------
+        # Structured 8-K metadata.
+        # ---------------------------------------------------------
+
+        if (
+            str(form_type)
+            .strip()
+            .upper()
+            == "8-K"
+        ):
+            details.append(
+                "SEC Item Codes: "
+                f"{cls._format_item_codes(item_codes)}"
+            )
+
+            details.append(
+                "Item Verification: "
+                f"{item_verification_status or 'NOT AVAILABLE'}"
+            )
+
+        # ---------------------------------------------------------
+        # Company identity verification.
+        # ---------------------------------------------------------
+
+        if company_verification_status:
+            details.append(
+                "Company Verification: "
+                f"{company_verification_status}"
+            )
+
+        # ---------------------------------------------------------
+        # Independent/manual audit status.
+        # ---------------------------------------------------------
+
+        if manual_audit_status:
+            details.append(
+                "Manual EDGAR Audit: "
+                f"{manual_audit_status}"
+            )
+
+        # ---------------------------------------------------------
+        # Remaining filing details.
+        # ---------------------------------------------------------
+
+        details.extend(
+            [
+                (
+                    "Accession Number: "
+                    f"{accession_number or 'N/A'}"
+                ),
+                (
+                    "Filename: "
+                    f"{filename or 'N/A'}"
+                ),
+                "",
+                "",
+                "FILING SUMMARY",
+                "-" * 60,
+                clean_summary,
+                "",
+                "",
+                "SOURCE INFORMATION",
+                "-" * 60,
+                "SEC Filing:",
+                sec_url or "N/A",
+                "",
+                "Downloaded File:",
+                local_path or "N/A",
+                "",
+                "",
+                (
+                    "This notification was generated "
+                    "automatically by the SEC Filing Watcher."
+                ),
+            ]
+        )
+
+        return "\n".join(
+            details
+        ).strip()
 
     def send_new_filing_notification(
         self,
@@ -146,24 +274,24 @@ class FilingNotificationService:
         local_path=None,
         sec_url=None,
         summary_text=None,
+        accepted_at_display=None,
+        entry_session=None,
+        item_codes=None,
+        item_verification_status=None,
+        company_verification_status=None,
+        manual_audit_status=None,
     ):
         """
-        Send the already-generated filing summary by email.
+        Send one filing summary notification.
 
-        Returns:
-            True:
-                email sent successfully
-
-            False:
-                notification disabled,
-                configuration missing,
-                summary missing,
-                or email sending failed
+        All metadata parameters are optional so existing callers
+        remain backward compatible.
         """
 
         # ---------------------------------------------------------
-        # Email notification feature switch.
+        # Feature switch.
         # ---------------------------------------------------------
+
         if not self.enabled:
             logger.info(
                 "SEC email notification disabled."
@@ -171,20 +299,20 @@ class FilingNotificationService:
             return False
 
         # ---------------------------------------------------------
-        # Recipient must be configured.
+        # Recipient configuration.
         # ---------------------------------------------------------
+
         if not self.recipient:
             logger.warning(
-                "SEC email notification skipped: "
-                "SEC_ALERT_RECIPIENT_EMAIL is not configured."
+                "SEC email skipped: recipient "
+                "is not configured."
             )
             return False
 
         # ---------------------------------------------------------
-        # Clean ONLY the copy being sent through email.
-        #
-        # The original PostgreSQL summary remains untouched.
+        # Clean only the outgoing email copy.
         # ---------------------------------------------------------
+
         clean_summary = (
             self._clean_summary_for_email(
                 summary_text
@@ -193,9 +321,8 @@ class FilingNotificationService:
 
         if not clean_summary:
             logger.warning(
-                "SEC email notification skipped: "
-                "summary is empty for ticker=%s "
-                "accession=%s",
+                "SEC email skipped: empty summary "
+                "ticker=%s accession=%s",
                 ticker,
                 accession_number,
             )
@@ -204,6 +331,7 @@ class FilingNotificationService:
         # ---------------------------------------------------------
         # Sender configuration.
         # ---------------------------------------------------------
+
         sender_name = getattr(
             settings,
             "SEC_EMAIL_SENDER_NAME",
@@ -218,7 +346,7 @@ class FilingNotificationService:
 
         if not sender_email:
             logger.warning(
-                "SEC email notification skipped: "
+                "SEC email skipped: "
                 "DEFAULT_FROM_EMAIL is empty."
             )
             return False
@@ -229,48 +357,53 @@ class FilingNotificationService:
         )
 
         # ---------------------------------------------------------
-        # Email subject.
+        # Subject.
         # ---------------------------------------------------------
+
         subject = (
-            f"[SEC Filing Alert] "
+            "[SEC Filing Alert] "
             f"{ticker} - New {form_type} Filing"
         )
 
         # ---------------------------------------------------------
-        # Human-readable email body.
+        # Body.
         # ---------------------------------------------------------
-        body = f"""
-A new SEC filing has been detected and processed successfully.
 
-COMPANY / FILING DETAILS
-------------------------------------------------------------
-Ticker: {ticker}
-Form Type: {form_type}
-Filing Date: {filing_date or "N/A"}
-Accession Number: {accession_number or "N/A"}
-Filename: {filename or "N/A"}
-
-
-FILING SUMMARY
-------------------------------------------------------------
-{clean_summary}
-
-
-SOURCE INFORMATION
-------------------------------------------------------------
-SEC Filing:
-{sec_url or "N/A"}
-
-Downloaded File:
-{local_path or "N/A"}
-
-
-This notification was generated automatically by the SEC Filing Watcher.
-""".strip()
+        body = self._build_body(
+            ticker=ticker,
+            form_type=form_type,
+            filename=filename,
+            filing_date=filing_date,
+            accession_number=(
+                accession_number
+            ),
+            local_path=local_path,
+            sec_url=sec_url,
+            clean_summary=clean_summary,
+            accepted_at_display=(
+                accepted_at_display
+            ),
+            entry_session=(
+                entry_session
+            ),
+            item_codes=(
+                item_codes
+            ),
+            item_verification_status=(
+                item_verification_status
+            ),
+            company_verification_status=(
+                company_verification_status
+            ),
+            manual_audit_status=(
+                manual_audit_status
+            ),
+        )
 
         # ---------------------------------------------------------
-        # Optional reply-to address.
+        # Optional reply-to.
         # ---------------------------------------------------------
+
         reply_to_email = getattr(
             settings,
             "SEC_REPLY_TO_EMAIL",
@@ -300,8 +433,7 @@ This notification was generated automatically by the SEC Filing Watcher.
 
             if result == 1:
                 logger.info(
-                    "SEC filing summary email sent "
-                    "successfully: "
+                    "SEC filing email sent: "
                     "ticker=%s form=%s accession=%s "
                     "recipient=%s",
                     ticker,
@@ -313,8 +445,7 @@ This notification was generated automatically by the SEC Filing Watcher.
                 return True
 
             logger.warning(
-                "SEC filing summary email returned "
-                "unexpected send result: "
+                "SEC email returned unexpected "
                 "result=%s ticker=%s accession=%s",
                 result,
                 ticker,
@@ -324,18 +455,16 @@ This notification was generated automatically by the SEC Filing Watcher.
             return False
 
         except Exception:
-            # -----------------------------------------------------
-            # Very important:
+            # SMTP/email problems must never stop:
             #
-            # SMTP/email failure must NEVER break:
-            #   - downloading
-            #   - indexing
-            #   - PostgreSQL storage
-            #   - summary generation
-            #   - the remaining watcher process
-            # -----------------------------------------------------
+            # - downloads
+            # - registration
+            # - indexing
+            # - summary generation
+            # - remaining watcher processing
+
             logger.exception(
-                "SEC filing summary email failed: "
+                "SEC filing email failed: "
                 "ticker=%s form=%s accession=%s",
                 ticker,
                 form_type,
