@@ -33,6 +33,7 @@ class FilingRegistrationService:
         local_path,
         source_url,
         accepted_at=None,
+        entry_session=None,
     ):
         ticker = str(
             ticker
@@ -81,6 +82,7 @@ class FilingRegistrationService:
                     "form": form,
                     "filing_date": filing_date,
                     "accepted_at": accepted_at,
+                    "entry_session": entry_session,
                     "primary_document": (
                         primary_document
                         or ""
@@ -148,7 +150,14 @@ class FilingRegistrationService:
                 update_fields.append(
                     "accepted_at"
                 )
+            if entry_session is not None:
+                filing.entry_session = (
+                    entry_session
+                )
 
+                update_fields.append(
+                    "entry_session"
+                )
             if filing.downloaded_at is None:
                 filing.downloaded_at = (
                     timezone.now()

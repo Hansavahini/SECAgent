@@ -69,6 +69,13 @@ class Filing(models.Model):
         blank=True,
     )
 
+    entry_session = models.DateField(
+        null=True,
+        blank=True,
+        db_index=True,
+    )
+
+
     primary_document = models.CharField(
         max_length=255,
         blank=True,

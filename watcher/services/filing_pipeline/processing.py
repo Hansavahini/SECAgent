@@ -166,6 +166,7 @@ class FilingProcessingService:
                     local_path=download["path"],
                     source_url=download["url"],
                     accepted_at=metadata.accepted_at,
+                    entry_session=metadata.entry_session,
                 )
 
                 self.output.status("REGISTRATION", "SUCCESS")

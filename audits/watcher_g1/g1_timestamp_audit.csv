@@ -1,0 +1,3 @@
+audit_id,ticker,cik,accession_number,form_type,edgar_url,watcher_accepted_at,edgar_accepted_at,timestamp_match,watcher_entry_session,expected_entry_session,entry_session_match,watcher_item_codes,edgar_item_codes,item_codes_match,audited_by,audited_at,notes,overall_result
+G1-001,AMZN,1018724,0001104659-26-107526,8-K,https://www.sec.gov/Archives/edgar/data/1018724/000110465926107526/,2026-09-14 16:45:41 EDT,,PENDING,2026-09-15,,PENDING,"8.01, 9.01",,PENDING,Hansavahini,2026-09-17 ,"Manually verified against official SEC EDGAR Filing Detail page.
+Acceptance timestamp, entry session, and item codes matched",PASS

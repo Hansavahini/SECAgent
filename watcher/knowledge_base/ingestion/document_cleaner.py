@@ -79,14 +79,21 @@ class DocumentCleaner:
 
         text = html.unescape(text)
 
-        text = text.replace("\xa0", " ")
-
+        # Normalize invisible Unicode formatting characters that can
+# legitimately occur in SEC HTML / inline XBRL.
         text = re.sub(
-            r"[ \t]+",
-            " ",
+            r"[\u200b\u200c\u200d\ufeff]",
+            "",
             text,
         )
 
+        # Normalize every horizontal Unicode whitespace character to a
+        # normal ASCII space while preserving line boundaries.
+        text = re.sub(
+            r"[^\S\n]+",
+            " ",
+            text,
+        )
         text = re.sub(
             r" *\n *",
             "\n",
