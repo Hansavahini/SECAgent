@@ -13,10 +13,10 @@ class SECSection:
 
 class SECParser:
     ITEM_PATTERN = re.compile(
-        r"(?im)^[ \t]*"
-        r"item[ \t]+"
+        r"(?im)^[^\S\n]*"
+        r"item[^\S\n]+"
         r"(?P<number>\d{1,2}(?:\.\d{2})?[A-Z]?)"
-        r"[ \t]*[\.\:\-\u2013\u2014]?[ \t]*"
+        r"[^\S\n]*[\.\:\-\u2013\u2014]?[^\S\n]*"
         r"(?P<title>[^\n]*)"
         r"$"
     )
